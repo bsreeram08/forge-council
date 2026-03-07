@@ -5,6 +5,7 @@ import type { AgentReview, PlanOutput, GoalAncestry } from './schemas';
 import { logBuffer } from '../server/session.ts';
 import { logError } from '../errors/logger.ts';
 import { consumeStructuredStream } from '../cli/stream-display.ts';
+import { eventBus } from '../server/routes/ws.ts';
 
 /**
  * Simple semaphore for limiting concurrency.
@@ -123,26 +124,34 @@ export async function runParallelReviews(
   const reviewPromises = agents.map(async (agent) => {
     await semaphore.acquire();
     try {
-      logBuffer.append('agent', agent.id ?? 'unknown', `${agent.name} starting review...`);
+      const agentId = agent.id ?? 'unknown';
+      const agentName = agent.name ?? agentId;
+
+      logBuffer.append('agent', agentId, `${agentName} starting review...`);
+      eventBus.publish('agent-progress', { agentId, name: agentName, status: 'working', action: 'starting review...' });
 
       try {
         const review = await attemptAgentReview(agent, prompt);
-        logBuffer.append('agent', agent.id ?? 'unknown', `${agent.name} review complete: ${review.weightedScore.toFixed(1)}/10`);
+        logBuffer.append('agent', agentId, `${agentName} review complete: ${review.weightedScore.toFixed(1)}/10`);
+        eventBus.publish('agent-progress', { agentId, name: agentName, status: 'done', score: review.weightedScore, verdict: review.verdict });
         return review;
       } catch (firstErr) {
         // Retry once with a clearer prompt
         const retryMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
-        logBuffer.append('info', agent.id ?? 'unknown', `${agent.name} review failed, retrying... (${retryMsg.slice(0, 100)})`);
+        logBuffer.append('info', agentId, `${agentName} review failed, retrying... (${retryMsg.slice(0, 100)})`);
         logError('parallel-review.first-attempt', firstErr, { agentId: agent.id, agentName: agent.name });
+        eventBus.publish('agent-progress', { agentId, name: agentName, status: 'working', action: 'retrying...' });
 
         try {
           const review = await attemptAgentReview(agent, prompt);
-          logBuffer.append('agent', agent.id ?? 'unknown', `${agent.name} review complete on retry: ${review.weightedScore.toFixed(1)}/10`);
+          logBuffer.append('agent', agentId, `${agentName} review complete on retry: ${review.weightedScore.toFixed(1)}/10`);
+          eventBus.publish('agent-progress', { agentId, name: agentName, status: 'done', score: review.weightedScore, verdict: review.verdict });
           return review;
         } catch (retryErr) {
           const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-          logBuffer.append('error', agent.id ?? 'unknown', `${agent.name} review failed after retry: ${msg.slice(0, 200)}`);
+          logBuffer.append('error', agentId, `${agentName} review failed after retry: ${msg.slice(0, 200)}`);
           logError('parallel-review.retry', retryErr, { agentId: agent.id, agentName: agent.name });
+          eventBus.publish('agent-progress', { agentId, name: agentName, status: 'failed', error: msg.slice(0, 200) });
           throw retryErr;
         }
       }

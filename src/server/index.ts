@@ -4,6 +4,7 @@ import type { SessionManager } from './session.ts';
 import { createApiRoutes } from './routes/api.ts';
 import { logBuffer } from './session.ts';
 import { logError } from '../errors/logger.ts';
+import { eventBus } from './routes/ws.ts';
 
 function escapeHtml(str: string): string {
   return str
@@ -64,6 +65,13 @@ export function startServer(app: Hono, port: number): { port: number; server: Re
   logBuffer.onEntry((entry) => {
     server.publish('logs', JSON.stringify({ type: 'log', data: entry }));
   });
+
+  // Pipe eventBus events to WebSocket subscribers
+  for (const topic of ['round', 'plan', 'score', 'freshEyes', 'agent-progress'] as const) {
+    eventBus.subscribe(topic, (data) => {
+      server.publish('events', JSON.stringify({ type: topic, data }));
+    });
+  }
 
   return { port: server.port ?? port, server };
 }
@@ -185,8 +193,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     function scoreColor(s) { return s >= 7.5 ? 'var(--green)' : s >= 5 ? 'var(--yellow)' : 'var(--red)'; }
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
-    const AGENTS = { executor: 'Ford', architect: 'Torvalds', coder: 'Carmack', reviewer: 'Guido', 'spec-agent': 'Fowler', planner: 'Doshi', designer: 'Jobs', researcher: 'Scott', qa: 'Whittaker', security: 'Schneier', integrator: 'Tesla', docs: 'Knuth', scout: 'Scout' };
-
     function updateSession(session) {
       if (!session) { badge.textContent = 'No Session'; badge.className = 'badge badge-stopped'; return; }
       badge.textContent = session.status.charAt(0).toUpperCase() + session.status.slice(1);
@@ -196,12 +202,18 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       sId.textContent = session.id.slice(0, 8);
       sIdea.textContent = session.idea;
 
+      // Only show active agents, not all 13
       agentsBar.innerHTML = '';
-      for (const [id, name] of Object.entries(AGENTS)) {
-        const chip = document.createElement('span');
-        chip.className = 'agent-chip' + (session.activeAgents.includes(id) ? ' active' : '');
-        chip.textContent = name;
-        agentsBar.appendChild(chip);
+      const active = session.activeAgents || [];
+      if (active.length === 0) {
+        agentsBar.innerHTML = '<span style="color:var(--muted);font-size:12px">No active agents</span>';
+      } else {
+        for (const id of active) {
+          const chip = document.createElement('span');
+          chip.className = 'agent-chip active';
+          chip.textContent = id;
+          agentsBar.appendChild(chip);
+        }
       }
 
       if (session.scores.length > 0) {

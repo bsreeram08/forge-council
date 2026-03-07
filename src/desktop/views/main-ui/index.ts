@@ -22,33 +22,47 @@ interface LogEntry {
   message: string;
 }
 
-// All 13 council agents
-const AGENTS: Record<string, { name: string; role: string }> = {
-  executor:    { name: 'Ford',      role: 'Executor' },
-  architect:   { name: 'Torvalds',  role: 'System Architect' },
-  coder:       { name: 'Carmack',   role: 'Implementation' },
-  reviewer:    { name: 'Guido',     role: 'Readability' },
-  'spec-agent':{ name: 'Fowler',    role: 'Requirements' },
-  planner:     { name: 'Doshi',     role: 'Project Manager' },
-  designer:    { name: 'Jobs',      role: 'UX/UI Design' },
-  researcher:  { name: 'Scott',     role: 'Research' },
-  qa:          { name: 'Whittaker', role: 'QA Engineer' },
-  security:    { name: 'Schneier',  role: 'Security' },
-  integrator:  { name: 'Tesla',     role: 'Infrastructure' },
-  docs:        { name: 'Knuth',     role: 'Documentation' },
-  scout:       { name: 'Scout',     role: 'Clarifier' },
-};
+interface AgentProgress {
+  agentId: string;
+  name: string;
+  status: 'working' | 'done' | 'failed';
+  action?: string;
+  score?: number;
+  verdict?: string;
+  error?: string;
+}
+
+interface AgentState {
+  id: string;
+  name: string;
+  status: 'idle' | 'working' | 'done' | 'failed';
+  actions: string[];
+  score?: number;
+  verdict?: string;
+  error?: string;
+  expanded: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
 
 let apiBase = '';
 let ws: WebSocket | null = null;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let connectedPort: number | null = null;
+let currentPhase = '';
+let agentStates = new Map<string, AgentState>();
 
+// ---------------------------------------------------------------------------
 // DOM refs
+// ---------------------------------------------------------------------------
+
 const statusBadge = document.getElementById('status-badge')!;
 const sessionStatus = document.getElementById('session-status')!;
 const sessionRound = document.getElementById('session-round')!;
 const sessionIdea = document.getElementById('session-idea')!;
+const phaseLabel = document.getElementById('session-phase')!;
 const agentCards = document.getElementById('agent-cards')!;
 const scoresChart = document.getElementById('scores-chart')!;
 const liveOutput = document.getElementById('live-output')!;
@@ -56,6 +70,10 @@ const connectDialog = document.getElementById('connect-dialog')!;
 const portInput = document.getElementById('port-input') as HTMLInputElement;
 const connectBtn = document.getElementById('connect-btn')!;
 const disconnectBtn = document.getElementById('disconnect-btn');
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function escapeHtml(str: string): string {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -77,42 +95,119 @@ function logLevelClass(level: string): string {
   }
 }
 
+function statusIcon(status: AgentState['status']): string {
+  switch (status) {
+    case 'working': return '<span class="status-dot pulse"></span>';
+    case 'done': return '<span class="status-dot done"></span>';
+    case 'failed': return '<span class="status-dot failed"></span>';
+    default: return '<span class="status-dot idle"></span>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent card rendering — only active agents
+// ---------------------------------------------------------------------------
+
+function ensureAgentState(agentId: string, name: string): AgentState {
+  let state = agentStates.get(agentId);
+  if (!state) {
+    state = { id: agentId, name, status: 'idle', actions: [], expanded: false };
+    agentStates.set(agentId, state);
+  }
+  return state;
+}
+
 function renderAgentCards(session: Session) {
-  agentCards.innerHTML = '';
-  for (const [id, meta] of Object.entries(AGENTS)) {
-    const isActive = session.activeAgents?.includes(id);
-    const lastScores = session.scores?.[session.scores.length - 1];
-    const score = lastScores?.agents?.[id];
+  // If no active agents, show empty state
+  if (!session.activeAgents || session.activeAgents.length === 0) {
+    agentCards.innerHTML = '<div class="empty-agents">No active agents</div>';
+    return;
+  }
+
+  const lastScores = session.scores?.[session.scores.length - 1];
+
+  // Reconcile — mark agents not in activeAgents as idle
+  for (const [id, state] of agentStates) {
+    if (!session.activeAgents.includes(id) && state.status === 'working') {
+      state.status = 'idle';
+    }
+  }
+
+  // Build cards only for active agents
+  const fragment = document.createDocumentFragment();
+
+  for (const agentId of session.activeAgents) {
+    const state = agentStates.get(agentId);
+    const name = state?.name ?? agentId;
+    const agentScore = lastScores?.agents?.[agentId];
 
     const card = document.createElement('div');
-    card.className = `agent-card${isActive ? ' active' : ''}`;
-    card.innerHTML = `
-      <div class="name">${escapeHtml(meta.name)}</div>
-      <div class="role">${escapeHtml(meta.role)}</div>
-      ${score !== undefined ? `
-        <div class="score" style="color: ${scoreColor(score)}">${score.toFixed(1)}</div>
-        <div class="score-bar">
-          <div class="score-bar-fill" style="width: ${(score / 10) * 100}%; background: ${scoreColor(score)}"></div>
-        </div>
-      ` : `<div class="score" style="color: var(--text-muted)">—</div>`}
+    card.className = `agent-card ${state?.status ?? 'working'}`;
+    card.dataset.agentId = agentId;
+
+    // Header row
+    const header = document.createElement('div');
+    header.className = 'agent-header';
+    header.innerHTML = `
+      ${statusIcon(state?.status ?? 'working')}
+      <span class="name">${escapeHtml(name)}</span>
+      ${agentScore !== undefined
+        ? `<span class="score" style="color: ${scoreColor(agentScore)}">${agentScore.toFixed(1)}</span>`
+        : ''}
+      <span class="expand-btn">${state?.expanded ? '▾' : '▸'}</span>
     `;
-    agentCards.appendChild(card);
+    card.appendChild(header);
+
+    // Status line
+    const statusLine = document.createElement('div');
+    statusLine.className = 'agent-status-line';
+    if (state?.status === 'done' && state.verdict) {
+      statusLine.innerHTML = `<span class="verdict verdict-${state.verdict}">${escapeHtml(state.verdict)}</span>`;
+      if (state.score !== undefined) {
+        statusLine.innerHTML += ` <span class="agent-score" style="color:${scoreColor(state.score)}">${state.score.toFixed(1)}/10</span>`;
+      }
+    } else if (state?.status === 'failed') {
+      statusLine.innerHTML = `<span class="verdict verdict-failed">${escapeHtml(state.error ?? 'failed')}</span>`;
+    } else if (state?.actions.length) {
+      statusLine.innerHTML = `<span class="current-action">${escapeHtml(state.actions[state.actions.length - 1]!)}</span>`;
+    } else {
+      statusLine.innerHTML = `<span class="current-action">starting...</span>`;
+    }
+    card.appendChild(statusLine);
+
+    // Expandable action log
+    if (state?.expanded && state.actions.length > 0) {
+      const log = document.createElement('div');
+      log.className = 'agent-log';
+      // Show last 10 actions
+      const visible = state.actions.slice(-10);
+      for (const action of visible) {
+        const line = document.createElement('div');
+        line.className = 'agent-log-line';
+        line.textContent = action;
+        log.appendChild(line);
+      }
+      card.appendChild(log);
+    }
+
+    // Click to expand/collapse
+    header.addEventListener('click', () => {
+      if (state) {
+        state.expanded = !state.expanded;
+        renderAgentCards(lastSession!);
+      }
+    });
+
+    fragment.appendChild(card);
   }
+
+  agentCards.innerHTML = '';
+  agentCards.appendChild(fragment);
 }
 
-function renderDefaultAgentCards() {
-  agentCards.innerHTML = '';
-  for (const [, meta] of Object.entries(AGENTS)) {
-    const card = document.createElement('div');
-    card.className = 'agent-card';
-    card.innerHTML = `
-      <div class="name">${escapeHtml(meta.name)}</div>
-      <div class="role">${escapeHtml(meta.role)}</div>
-      <div class="score" style="color: var(--text-muted)">—</div>
-    `;
-    agentCards.appendChild(card);
-  }
-}
+// ---------------------------------------------------------------------------
+// Scores
+// ---------------------------------------------------------------------------
 
 function renderScores(session: Session) {
   scoresChart.innerHTML = '';
@@ -137,17 +232,30 @@ function renderScores(session: Session) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Session update
+// ---------------------------------------------------------------------------
+
+let lastSession: Session | null = null;
+
 function updateUI(session: Session) {
+  lastSession = session;
+
   statusBadge.className = `badge badge-${session.status === 'running' ? 'running' : 'connected'}`;
   statusBadge.textContent = session.status.charAt(0).toUpperCase() + session.status.slice(1);
 
   sessionStatus.textContent = session.status;
   sessionRound.textContent = `${session.currentRound}`;
   sessionIdea.textContent = session.idea || '—';
+  phaseLabel.textContent = currentPhase || '—';
 
   renderAgentCards(session);
   renderScores(session);
 }
+
+// ---------------------------------------------------------------------------
+// Log output
+// ---------------------------------------------------------------------------
 
 function appendLog(entry: LogEntry) {
   const line = document.createElement('div');
@@ -159,19 +267,50 @@ function appendLog(entry: LogEntry) {
   liveOutput.appendChild(line);
   liveOutput.scrollTop = liveOutput.scrollHeight;
 
-  // Keep log panel from growing unbounded
   while (liveOutput.childNodes.length > 500) {
     liveOutput.removeChild(liveOutput.firstChild!);
   }
 }
 
-function appendOutputText(text: string, cls = 'log-system') {
-  const line = document.createElement('div');
-  line.className = `log-line ${cls}`;
-  line.textContent = text;
-  liveOutput.appendChild(line);
-  liveOutput.scrollTop = liveOutput.scrollHeight;
+// ---------------------------------------------------------------------------
+// Agent progress handling
+// ---------------------------------------------------------------------------
+
+function handleAgentProgress(data: AgentProgress) {
+  const state = ensureAgentState(data.agentId, data.name);
+  state.status = data.status;
+
+  if (data.action) {
+    state.actions.push(data.action);
+  }
+  if (data.score !== undefined) state.score = data.score;
+  if (data.verdict) state.verdict = data.verdict;
+  if (data.error) state.error = data.error;
+
+  if (data.status === 'done') {
+    state.actions.push(`completed — ${data.verdict ?? 'done'} (${data.score?.toFixed(1) ?? '?'}/10)`);
+  } else if (data.status === 'failed') {
+    state.actions.push(`failed: ${data.error ?? 'unknown error'}`);
+  }
+
+  // Re-render agent cards if we have a session
+  if (lastSession) {
+    renderAgentCards(lastSession);
+  }
 }
+
+function handleRoundEvent(data: { round: number; phase: string }) {
+  currentPhase = data.phase;
+  // Reset agent states for new phase
+  agentStates.clear();
+  if (lastSession) {
+    updateUI(lastSession);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Network
+// ---------------------------------------------------------------------------
 
 async function fetchSession(): Promise<Session | null> {
   try {
@@ -184,73 +323,84 @@ async function fetchSession(): Promise<Session | null> {
 }
 
 function connectWebSocket(port: number) {
-  if (ws) {
-    ws.close();
-    ws = null;
-  }
+  if (ws) { ws.close(); ws = null; }
 
   try {
     ws = new WebSocket(`ws://localhost:${port}/ws`);
 
     ws.onopen = () => {
-      appendOutputText('Connected to session WebSocket', 'log-system');
+      appendLog({ id: 0, sessionId: '', timestamp: new Date().toISOString(), level: 'system', source: 'desktop', message: 'Connected to session' });
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
 
-        if (msg.type === 'log' && msg.data) {
-          appendLog(msg.data as LogEntry);
+        switch (msg.type) {
+          case 'log':
+            if (msg.data) appendLog(msg.data as LogEntry);
+            // Refresh session on score/system events
+            if (msg.data?.level === 'score' || msg.data?.source === 'session') {
+              fetchSession().then((s) => s && updateUI(s));
+            }
+            break;
 
-          // Refresh session on score or important events
-          const entry = msg.data as LogEntry;
-          if (entry.level === 'score' || entry.source === 'session') {
+          case 'agent-progress':
+            if (msg.data) handleAgentProgress(msg.data as AgentProgress);
+            break;
+
+          case 'round':
+            if (msg.data) handleRoundEvent(msg.data as { round: number; phase: string });
             fetchSession().then((s) => s && updateUI(s));
-          }
-        } else if (msg.type === 'event' && msg.data) {
-          fetchSession().then((s) => s && updateUI(s));
+            break;
+
+          case 'score':
+          case 'plan':
+          case 'freshEyes':
+            fetchSession().then((s) => s && updateUI(s));
+            break;
         }
       } catch {
-        appendOutputText(event.data, 'log-info');
+        // Non-JSON message, ignore
       }
     };
 
     ws.onerror = () => {
-      appendOutputText('WebSocket error', 'log-error');
+      appendLog({ id: 0, sessionId: '', timestamp: new Date().toISOString(), level: 'error', source: 'desktop', message: 'WebSocket error' });
     };
 
     ws.onclose = () => {
-      appendOutputText('WebSocket disconnected', 'log-system');
+      appendLog({ id: 0, sessionId: '', timestamp: new Date().toISOString(), level: 'system', source: 'desktop', message: 'WebSocket disconnected' });
     };
   } catch {
-    appendOutputText('Failed to connect WebSocket', 'log-error');
+    appendLog({ id: 0, sessionId: '', timestamp: new Date().toISOString(), level: 'error', source: 'desktop', message: 'Failed to connect WebSocket' });
   }
 }
 
+// ---------------------------------------------------------------------------
+// Connect / Disconnect
+// ---------------------------------------------------------------------------
+
 function disconnect() {
-  if (ws) {
-    ws.close();
-    ws = null;
-  }
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
-  }
+  if (ws) { ws.close(); ws = null; }
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
   connectedPort = null;
   apiBase = '';
+  lastSession = null;
+  currentPhase = '';
+  agentStates.clear();
 
   statusBadge.className = 'badge badge-disconnected';
   statusBadge.textContent = 'Disconnected';
   sessionStatus.textContent = '—';
   sessionRound.textContent = '—';
   sessionIdea.textContent = '—';
+  phaseLabel.textContent = '—';
   scoresChart.innerHTML = '<div style="color: var(--text-muted)">No scores yet</div>';
   liveOutput.innerHTML = '';
+  agentCards.innerHTML = '<div class="empty-agents">Not connected</div>';
 
-  renderDefaultAgentCards();
   connectDialog.classList.remove('hidden');
-
   if (disconnectBtn) disconnectBtn.classList.add('hidden');
 }
 
@@ -264,7 +414,7 @@ async function connect(port: number) {
 
   const session = await fetchSession();
   if (!session) {
-    appendOutputText(`No session found on port ${port}. Is a forge session running?`, 'log-error');
+    appendLog({ id: 0, sessionId: '', timestamp: new Date().toISOString(), level: 'error', source: 'desktop', message: `No session found on port ${port}` });
     statusBadge.className = 'badge badge-disconnected';
     statusBadge.textContent = 'Disconnected';
     connectDialog.classList.remove('hidden');
@@ -272,12 +422,17 @@ async function connect(port: number) {
   }
 
   connectedPort = port;
+
+  // Seed agent states from session's active agents
+  for (const agentId of session.activeAgents) {
+    ensureAgentState(agentId, agentId);
+  }
+
   updateUI(session);
   connectWebSocket(port);
 
   if (disconnectBtn) disconnectBtn.classList.remove('hidden');
 
-  // Poll session state every 3s
   if (pollInterval) clearInterval(pollInterval);
   pollInterval = setInterval(async () => {
     const s = await fetchSession();
@@ -285,13 +440,13 @@ async function connect(port: number) {
   }, 3000);
 }
 
-// --- Auto-connect strategies ---
+// ---------------------------------------------------------------------------
+// Auto-connect
+// ---------------------------------------------------------------------------
 
 async function probePort(port: number): Promise<boolean> {
   try {
-    const res = await fetch(`http://localhost:${port}/api/health`, {
-      signal: AbortSignal.timeout(1500),
-    });
+    const res = await fetch(`http://localhost:${port}/api/health`, { signal: AbortSignal.timeout(1500) });
     return res.ok;
   } catch {
     return false;
@@ -299,7 +454,6 @@ async function probePort(port: number): Promise<boolean> {
 }
 
 async function tryAutoConnect() {
-  // Strategy 1: Port injected from bun process via executeJavascript
   const injectedPort = (window as any).__forgecouncilPort as number | undefined;
   if (injectedPort && injectedPort > 0) {
     if (await probePort(injectedPort)) {
@@ -307,12 +461,9 @@ async function tryAutoConnect() {
       return;
     }
   }
-
-  // Strategy 2: Show connect dialog (user enters port manually)
   connectDialog.classList.remove('hidden');
 }
 
-// Listen for late port injection from bun process
 window.addEventListener('forge-port', async (e: Event) => {
   const port = (e as CustomEvent).detail as number;
   if (port > 0 && !connectedPort) {
@@ -322,12 +473,13 @@ window.addEventListener('forge-port', async (e: Event) => {
   }
 });
 
-// --- Event handlers ---
+// ---------------------------------------------------------------------------
+// Event handlers
+// ---------------------------------------------------------------------------
+
 connectBtn.addEventListener('click', () => {
   const port = parseInt(portInput.value);
-  if (port > 0 && port <= 65535) {
-    connect(port);
-  }
+  if (port > 0 && port <= 65535) connect(port);
 });
 
 portInput.addEventListener('keydown', (e) => {
@@ -338,7 +490,10 @@ if (disconnectBtn) {
   disconnectBtn.addEventListener('click', disconnect);
 }
 
-// --- Boot ---
-renderDefaultAgentCards();
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+agentCards.innerHTML = '<div class="empty-agents">Not connected</div>';
 scoresChart.innerHTML = '<div style="color: var(--text-muted)">No scores yet</div>';
 tryAutoConnect();
