@@ -370,7 +370,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   p.log.step('⑦ Ship!');
 
   // Ship summary
-  const totalFiles = (codingOutputs?.flatMap(o => o.files) ?? []).length;
+  const totalFiles = new Set(codingOutputs?.flatMap(o => o.files.map(f => f.path)) ?? []).size;
   const totalCommits = (codingOutputs?.length ?? 0) + fixOutputs.length;
   const reviewScores = reviews.map(r => `${r.score}/10`).join(', ');
   const costStr = `$${tokenCounter.estimatedCost.toFixed(2)}`;
