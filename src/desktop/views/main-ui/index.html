@@ -19,35 +19,105 @@
       </div>
     </header>
 
+    <!-- Navigation Tabs -->
+    <nav id="nav-tabs" class="nav-tabs">
+      <button class="nav-tab active" data-tab="tab-session">Session</button>
+      <button class="nav-tab" data-tab="tab-plan">Plan</button>
+      <button class="nav-tab" data-tab="tab-reviews">Reviews</button>
+      <button class="nav-tab" data-tab="tab-council">Council</button>
+      <button class="nav-tab" data-tab="tab-history">History</button>
+    </nav>
+
     <main id="main">
-      <!-- Session Info -->
-      <section id="session-panel" class="panel">
-        <h2>Session</h2>
-        <div id="session-info" class="info-grid">
-          <span class="label">Status</span><span id="session-status">—</span>
-          <span class="label">Round</span><span id="session-round">—</span>
-          <span class="label">Phase</span><span id="session-phase">—</span>
-          <span class="label">Idea</span><span id="session-idea">—</span>
-        </div>
-      </section>
+      <!-- ====== TAB: Session (default) ====== -->
+      <div id="tab-session" class="tab-content active">
+        <!-- Session Info -->
+        <section id="session-panel" class="panel">
+          <h2>Session</h2>
+          <div id="session-info" class="info-grid">
+            <span class="label">Status</span><span id="session-status">—</span>
+            <span class="label">Round</span><span id="session-round">—</span>
+            <span class="label">Phase</span><span id="session-phase">—</span>
+            <span class="label">Idea</span><span id="session-idea">—</span>
+          </div>
+        </section>
 
-      <!-- Agent Cards -->
-      <section id="agents-panel" class="panel">
-        <h2>Council Agents</h2>
-        <div id="agent-cards" class="card-grid"></div>
-      </section>
+        <!-- Guidance / Steer -->
+        <section id="guidance-panel" class="panel">
+          <h2>Guidance</h2>
+          <div id="guidance-history" class="guidance-history"></div>
+          <div class="guidance-input-row">
+            <input type="text" id="guidance-input" placeholder="Inject guidance for the current session..." />
+            <button id="guidance-btn" class="btn-primary">Send</button>
+          </div>
+        </section>
 
-      <!-- Scores -->
-      <section id="scores-panel" class="panel">
-        <h2>Scores</h2>
-        <div id="scores-chart"></div>
-      </section>
+        <!-- Agent Cards -->
+        <section id="agents-panel" class="panel">
+          <h2>Active Agents</h2>
+          <div id="agent-cards" class="card-grid"></div>
+        </section>
 
-      <!-- Live Output -->
-      <section id="output-panel" class="panel">
-        <h2>Live Output</h2>
-        <div id="live-output" class="output-log"></div>
-      </section>
+        <!-- Scores -->
+        <section id="scores-panel" class="panel">
+          <h2>Scores</h2>
+          <div id="scores-chart"></div>
+        </section>
+
+        <!-- Live Output -->
+        <section id="output-panel" class="panel">
+          <h2>Live Output</h2>
+          <div id="live-output" class="output-log"></div>
+        </section>
+      </div>
+
+      <!-- ====== TAB: Plan ====== -->
+      <div id="tab-plan" class="tab-content">
+        <section class="panel">
+          <h2>Current Plan</h2>
+          <div id="plan-round-label" class="plan-round-label"></div>
+          <div id="plan-viewer" class="plan-viewer">
+            <div class="empty-state">No plan yet — start a session to see the plan.</div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ====== TAB: Reviews ====== -->
+      <div id="tab-reviews" class="tab-content">
+        <section class="panel">
+          <h2>Agent Reviews</h2>
+          <div id="reviews-round-label" class="plan-round-label"></div>
+          <div id="reviews-list" class="reviews-list">
+            <div class="empty-state">No reviews yet.</div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ====== TAB: Council ====== -->
+      <div id="tab-council" class="tab-content">
+        <section class="panel">
+          <h2>Council Roster</h2>
+          <p class="panel-desc">All available agents and their capabilities.</p>
+          <div id="council-list" class="council-list">
+            <div class="empty-state">Not connected.</div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ====== TAB: History ====== -->
+      <div id="tab-history" class="tab-content">
+        <section class="panel">
+          <h2>Session History</h2>
+          <div id="history-list" class="history-list">
+            <div class="empty-state">Not connected.</div>
+          </div>
+        </section>
+        <!-- Detail panel shown when a session is selected -->
+        <section id="history-detail" class="panel hidden">
+          <h2>Session Detail</h2>
+          <div id="history-detail-content"></div>
+        </section>
+      </div>
     </main>
 
     <!-- Connection Dialog -->

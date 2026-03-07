@@ -2,9 +2,15 @@ import { Hono } from 'hono';
 import type { SessionManager } from '../session.ts';
 import { logBuffer } from '../session.ts';
 import { getStore } from '../store.ts';
+import { AGENT_DEFS } from '../../council/agent-registry.ts';
 
 export function createApiRoutes(sessionManager: SessionManager): Hono {
   const api = new Hono();
+
+  function getReviewsForRound(sessionId: string, round: number) {
+    const reviews = getStore().getReviews(sessionId, round);
+    return { round, reviews };
+  }
 
   api.get('/api/session', (c) => {
     const session = sessionManager.get();
@@ -15,8 +21,13 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
     const round = Number(c.req.param('round'));
     const session = sessionManager.get();
     if (!session) return c.json({ round, reviews: [] });
-    const reviews = getStore().getReviews(session.id, round);
-    return c.json({ round, reviews });
+    return c.json(getReviewsForRound(session.id, round));
+  });
+
+  api.get('/api/reviews', (c) => {
+    const session = sessionManager.get();
+    if (!session) return c.json({ round: 0, reviews: [] });
+    return c.json(getReviewsForRound(session.id, session.currentRound));
   });
 
   api.get('/api/plan/:round', (c) => {
@@ -48,6 +59,21 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
 
   api.get('/api/health', (c) => {
     return c.json({ status: 'ok' });
+  });
+
+  // --- Council agents ---
+
+  api.get('/api/agents', (c) => {
+    const agents = AGENT_DEFS.map((def) => ({
+      id: def.id,
+      name: def.name,
+      role: def.role,
+      description: def.description,
+      required: def.required,
+      defaultModel: def.defaultModel,
+      dimensions: def.dimensions,
+    }));
+    return c.json(agents);
   });
 
   // --- Session history ---

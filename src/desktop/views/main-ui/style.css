@@ -504,3 +504,450 @@ main {
 .input-row button:hover {
   opacity: 0.9;
 }
+
+/* =========================================================================
+   Navigation Tabs
+   ========================================================================= */
+
+.nav-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-tab {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.nav-tab:hover {
+  color: var(--text);
+}
+
+.nav-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Tab content visibility */
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+/* =========================================================================
+   Guidance Panel
+   ========================================================================= */
+
+.guidance-history {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.guidance-entry {
+  font-size: 13px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  background: var(--bg);
+  border-radius: 4px;
+  border-left: 2px solid var(--accent);
+  color: var(--text-muted);
+}
+
+.guidance-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.guidance-input-row input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.guidance-input-row input:focus {
+  border-color: var(--accent);
+}
+
+.btn-primary {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* =========================================================================
+   Plan Viewer
+   ========================================================================= */
+
+.plan-round-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.plan-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plan-section {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.plan-section-header {
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-section-header:hover {
+  background: var(--surface-hover);
+}
+
+.plan-section-header .chevron {
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 12px;
+}
+
+.plan-section-body {
+  padding: 12px 14px;
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.plan-section-body.collapsed {
+  display: none;
+}
+
+/* =========================================================================
+   Reviews List
+   ========================================================================= */
+
+.reviews-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.review-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+.review-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.review-agent-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.review-verdict {
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.review-verdict.approve {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--green);
+}
+
+.review-verdict.request-changes {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--yellow);
+}
+
+.review-verdict.reject {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--red);
+}
+
+.review-score {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 700;
+  margin-left: 8px;
+}
+
+.review-dims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.review-dim {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.review-dim .dim-name {
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+.review-dim .dim-score {
+  font-weight: 600;
+}
+
+.review-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin: 8px 0 4px;
+}
+
+.review-item {
+  font-size: 12px;
+  padding: 2px 0;
+  color: var(--text-muted);
+  padding-left: 12px;
+  position: relative;
+}
+
+.review-item::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: var(--text-muted);
+}
+
+/* =========================================================================
+   Council Roster
+   ========================================================================= */
+
+.panel-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: -8px 0 12px;
+}
+
+.council-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.council-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.council-card.required {
+  border-left: 3px solid var(--accent);
+}
+
+.council-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.council-card-header .agent-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.council-card-header .agent-role {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.council-card-header .agent-model {
+  margin-left: auto;
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.council-card-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.council-card-dims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.council-dim-chip {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+/* =========================================================================
+   Session History
+   ========================================================================= */
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: 70px 80px 55px 90px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.history-row:hover {
+  border-color: var(--accent);
+}
+
+.history-row .hist-id {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.history-row .hist-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.history-row .hist-status.running { color: var(--accent); }
+.history-row .hist-status.completed { color: var(--green); }
+.history-row .hist-status.failed { color: var(--red); }
+.history-row .hist-status.stopped { color: var(--text-muted); }
+
+.history-row .hist-round {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-row .hist-date {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-row .hist-idea {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-header {
+  display: grid;
+  grid-template-columns: 70px 80px 55px 90px 1fr;
+  gap: 12px;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+/* History detail panel */
+#history-detail-content {
+  font-size: 13px;
+}
+
+#history-detail-content .info-grid {
+  margin-bottom: 12px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* =========================================================================
+   Shared
+   ========================================================================= */
+
+.empty-state {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+  padding: 16px 0;
+  text-align: center;
+}
