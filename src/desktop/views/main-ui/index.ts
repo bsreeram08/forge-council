@@ -43,6 +43,40 @@ interface AgentState {
   expanded: boolean;
 }
 
+interface AgentDef {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  required: boolean;
+  defaultModel: string;
+  dimensions: { name: string; weight: number; description: string }[];
+}
+
+interface AgentReview {
+  agentId: string;
+  codename: string;
+  dimensions: { name: string; score: number; weight: number; reasoning: string }[];
+  weightedScore: number;
+  verdict: 'approve' | 'request-changes' | 'reject';
+  summary: string;
+  concerns: string[];
+  suggestions: string[];
+}
+
+interface StoredSession {
+  id: string;
+  idea: string;
+  port: number;
+  pid: number;
+  started_at: string;
+  ended_at: string | null;
+  status: string;
+  current_round: number;
+  max_rounds: number;
+  score_threshold: number;
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -70,6 +104,27 @@ const connectDialog = document.getElementById('connect-dialog')!;
 const portInput = document.getElementById('port-input') as HTMLInputElement;
 const connectBtn = document.getElementById('connect-btn')!;
 const disconnectBtn = document.getElementById('disconnect-btn');
+
+// Guidance
+const guidanceInput = document.getElementById('guidance-input') as HTMLInputElement;
+const guidanceBtn = document.getElementById('guidance-btn')!;
+const guidanceHistory = document.getElementById('guidance-history')!;
+
+// Plan
+const planViewer = document.getElementById('plan-viewer')!;
+const planRoundLabel = document.getElementById('plan-round-label')!;
+
+// Reviews
+const reviewsList = document.getElementById('reviews-list')!;
+const reviewsRoundLabel = document.getElementById('reviews-round-label')!;
+
+// Council
+const councilList = document.getElementById('council-list')!;
+
+// History
+const historyList = document.getElementById('history-list')!;
+const historyDetail = document.getElementById('history-detail')!;
+const historyDetailContent = document.getElementById('history-detail-content')!;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,6 +158,31 @@ function statusIcon(status: AgentState['status']): string {
     default: return '<span class="status-dot idle"></span>';
   }
 }
+
+// ---------------------------------------------------------------------------
+// Navigation Tabs
+// ---------------------------------------------------------------------------
+
+document.querySelectorAll('.nav-tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    const target = (tab as HTMLElement).dataset.tab;
+    if (!target) return;
+
+    // Update tab buttons
+    document.querySelectorAll('.nav-tab').forEach((t) => t.classList.remove('active'));
+    tab.classList.add('active');
+
+    // Show/hide tab content
+    document.querySelectorAll('.tab-content').forEach((tc) => tc.classList.remove('active'));
+    document.getElementById(target)?.classList.add('active');
+
+    // Load data for the tab when switching to it
+    if (target === 'tab-plan') fetchPlan();
+    if (target === 'tab-reviews') fetchReviews();
+    if (target === 'tab-council') fetchCouncil();
+    if (target === 'tab-history') fetchHistory();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Agent card rendering — only active agents
@@ -233,6 +313,350 @@ function renderScores(session: Session) {
 }
 
 // ---------------------------------------------------------------------------
+// Guidance
+// ---------------------------------------------------------------------------
+
+function renderGuidance(guidance: string[]) {
+  guidanceHistory.innerHTML = '';
+  if (!guidance || guidance.length === 0) return;
+  for (const g of guidance) {
+    const div = document.createElement('div');
+    div.className = 'guidance-entry';
+    div.textContent = g;
+    guidanceHistory.appendChild(div);
+  }
+}
+
+async function submitGuidance() {
+  const text = guidanceInput.value.trim();
+  if (!text || !apiBase) return;
+
+  guidanceBtn.setAttribute('disabled', 'true');
+  try {
+    const res = await fetch(`${apiBase}/api/steer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ guidance: text }),
+    });
+    if (res.ok) {
+      guidanceInput.value = '';
+      // Refresh session to show new guidance
+      const session = await fetchSession();
+      if (session) {
+        updateUI(session);
+      }
+    }
+  } catch {
+    // silently fail
+  }
+  guidanceBtn.removeAttribute('disabled');
+}
+
+guidanceBtn.addEventListener('click', submitGuidance);
+guidanceInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitGuidance();
+});
+
+// ---------------------------------------------------------------------------
+// Plan Viewer
+// ---------------------------------------------------------------------------
+
+async function fetchPlan() {
+  if (!apiBase) return;
+  try {
+    const res = await fetch(`${apiBase}/api/plan`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !data.plan) {
+      planViewer.innerHTML = '<div class="empty-state">No plan yet — start a session to see the plan.</div>';
+      planRoundLabel.textContent = '';
+      return;
+    }
+
+    planRoundLabel.textContent = `Round ${data.round}`;
+    const plan = data.plan;
+    const sections = [
+      { title: 'Executive Summary', content: plan.executiveSummary },
+      { title: 'Architecture', content: plan.architecture },
+      { title: 'Phased Roadmap', content: plan.phasedRoadmap },
+      { title: 'Tech Stack', content: plan.techStack },
+      { title: 'Skeleton Code', content: plan.skeletonCode },
+    ];
+
+    planViewer.innerHTML = '';
+    for (const section of sections) {
+      if (!section.content) continue;
+      const el = document.createElement('div');
+      el.className = 'plan-section';
+
+      const header = document.createElement('div');
+      header.className = 'plan-section-header';
+      header.innerHTML = `<span class="chevron">▾</span> ${escapeHtml(section.title)}`;
+
+      const body = document.createElement('div');
+      body.className = 'plan-section-body';
+      body.textContent = section.content;
+
+      header.addEventListener('click', () => {
+        body.classList.toggle('collapsed');
+        const chevron = header.querySelector('.chevron')!;
+        chevron.textContent = body.classList.contains('collapsed') ? '▸' : '▾';
+      });
+
+      el.appendChild(header);
+      el.appendChild(body);
+      planViewer.appendChild(el);
+    }
+  } catch {
+    // silently fail
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reviews
+// ---------------------------------------------------------------------------
+
+async function fetchReviews() {
+  if (!apiBase) return;
+  try {
+    const res = await fetch(`${apiBase}/api/reviews`);
+    if (!res.ok) return;
+    const data: { round: number; reviews: AgentReview[] } = await res.json();
+
+    if (!data.reviews || data.reviews.length === 0) {
+      reviewsList.innerHTML = '<div class="empty-state">No reviews yet.</div>';
+      reviewsRoundLabel.textContent = '';
+      return;
+    }
+
+    reviewsRoundLabel.textContent = `Round ${data.round}`;
+    reviewsList.innerHTML = '';
+
+    for (const review of data.reviews) {
+      const card = document.createElement('div');
+      card.className = 'review-card';
+
+      // Header with agent name, verdict, score
+      const header = document.createElement('div');
+      header.className = 'review-card-header';
+      header.innerHTML = `
+        <span class="review-agent-name">${escapeHtml(review.codename)}</span>
+        <div>
+          <span class="review-verdict ${review.verdict}">${escapeHtml(review.verdict)}</span>
+          <span class="review-score" style="color: ${scoreColor(review.weightedScore)}">${review.weightedScore.toFixed(1)}/10</span>
+        </div>
+      `;
+      card.appendChild(header);
+
+      // Dimensions
+      if (review.dimensions && review.dimensions.length > 0) {
+        const dims = document.createElement('div');
+        dims.className = 'review-dims';
+        for (const dim of review.dimensions) {
+          const chip = document.createElement('span');
+          chip.className = 'review-dim';
+          chip.innerHTML = `<span class="dim-name">${escapeHtml(dim.name)}</span> <span class="dim-score" style="color: ${scoreColor(dim.score)}">${dim.score.toFixed(1)}</span>`;
+          dims.appendChild(chip);
+        }
+        card.appendChild(dims);
+      }
+
+      // Summary
+      if (review.summary) {
+        const summary = document.createElement('div');
+        summary.className = 'review-item';
+        summary.style.paddingLeft = '0';
+        summary.textContent = review.summary;
+        summary.style.marginBottom = '6px';
+        card.appendChild(summary);
+      }
+
+      // Concerns
+      if (review.concerns && review.concerns.length > 0) {
+        const title = document.createElement('div');
+        title.className = 'review-section-title';
+        title.textContent = 'Concerns';
+        card.appendChild(title);
+        for (const concern of review.concerns) {
+          const item = document.createElement('div');
+          item.className = 'review-item';
+          item.textContent = concern;
+          card.appendChild(item);
+        }
+      }
+
+      // Suggestions
+      if (review.suggestions && review.suggestions.length > 0) {
+        const title = document.createElement('div');
+        title.className = 'review-section-title';
+        title.textContent = 'Suggestions';
+        card.appendChild(title);
+        for (const suggestion of review.suggestions) {
+          const item = document.createElement('div');
+          item.className = 'review-item';
+          item.textContent = suggestion;
+          card.appendChild(item);
+        }
+      }
+
+      reviewsList.appendChild(card);
+    }
+  } catch {
+    // silently fail
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Council Roster
+// ---------------------------------------------------------------------------
+
+async function fetchCouncil() {
+  if (!apiBase) return;
+  try {
+    const res = await fetch(`${apiBase}/api/agents`);
+    if (!res.ok) return;
+    const agents: AgentDef[] = await res.json();
+
+    if (!agents || agents.length === 0) {
+      councilList.innerHTML = '<div class="empty-state">No agents configured.</div>';
+      return;
+    }
+
+    councilList.innerHTML = '';
+
+    for (const agent of agents) {
+      const card = document.createElement('div');
+      card.className = `council-card${agent.required ? ' required' : ''}`;
+
+      const header = document.createElement('div');
+      header.className = 'council-card-header';
+      header.innerHTML = `
+        <span class="agent-name">${escapeHtml(agent.name)}</span>
+        <span class="agent-role">— ${escapeHtml(agent.role)}</span>
+        <span class="agent-model">${escapeHtml(agent.defaultModel)}</span>
+      `;
+      card.appendChild(header);
+
+      const desc = document.createElement('div');
+      desc.className = 'council-card-desc';
+      desc.textContent = agent.description;
+      card.appendChild(desc);
+
+      if (agent.dimensions && agent.dimensions.length > 0) {
+        const dims = document.createElement('div');
+        dims.className = 'council-card-dims';
+        for (const dim of agent.dimensions) {
+          const chip = document.createElement('span');
+          chip.className = 'council-dim-chip';
+          chip.textContent = `${dim.name} (${(dim.weight * 100).toFixed(0)}%)`;
+          dims.appendChild(chip);
+        }
+        card.appendChild(dims);
+      }
+
+      councilList.appendChild(card);
+    }
+  } catch {
+    // silently fail
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session History
+// ---------------------------------------------------------------------------
+
+async function fetchHistory() {
+  if (!apiBase) return;
+  try {
+    const res = await fetch(`${apiBase}/api/sessions?limit=20`);
+    if (!res.ok) return;
+    const sessions: StoredSession[] = await res.json();
+
+    if (!sessions || sessions.length === 0) {
+      historyList.innerHTML = '<div class="empty-state">No past sessions found.</div>';
+      return;
+    }
+
+    historyList.innerHTML = '';
+
+    // Header row
+    const headerRow = document.createElement('div');
+    headerRow.className = 'history-header';
+    headerRow.innerHTML = '<span>ID</span><span>Status</span><span>Round</span><span>Date</span><span>Idea</span>';
+    historyList.appendChild(headerRow);
+
+    for (const sess of sessions) {
+      const row = document.createElement('div');
+      row.className = 'history-row';
+      row.innerHTML = `
+        <span class="hist-id">${escapeHtml(sess.id.slice(0, 8))}</span>
+        <span class="hist-status ${sess.status}">${escapeHtml(sess.status)}</span>
+        <span class="hist-round">R${sess.current_round}/${sess.max_rounds}</span>
+        <span class="hist-date">${escapeHtml(sess.started_at.slice(0, 10))}</span>
+        <span class="hist-idea">${escapeHtml(sess.idea.length > 60 ? sess.idea.slice(0, 57) + '...' : sess.idea)}</span>
+      `;
+
+      row.addEventListener('click', () => fetchSessionDetail(sess.id));
+      historyList.appendChild(row);
+    }
+  } catch {
+    // silently fail
+  }
+}
+
+async function fetchSessionDetail(sessionId: string) {
+  if (!apiBase) return;
+  try {
+    const res = await fetch(`${apiBase}/api/sessions/${sessionId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data) return;
+
+    historyDetail.classList.remove('hidden');
+
+    let html = `
+      <div class="info-grid">
+        <span class="label">ID</span><span style="font-family: var(--font); font-size: 12px;">${escapeHtml(data.id)}</span>
+        <span class="label">Idea</span><span>${escapeHtml(data.idea)}</span>
+        <span class="label">Status</span><span>${escapeHtml(data.status)}</span>
+        <span class="label">Round</span><span>${data.current_round}/${data.max_rounds}</span>
+        <span class="label">Threshold</span><span>${data.score_threshold}</span>
+        <span class="label">Started</span><span>${escapeHtml(data.started_at)}</span>
+        ${data.ended_at ? `<span class="label">Ended</span><span>${escapeHtml(data.ended_at)}</span>` : ''}
+      </div>
+    `;
+
+    // Scores
+    if (data.scores && data.scores.length > 0) {
+      html += '<h3 style="font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin: 12px 0 6px;">Scores</h3>';
+      for (const score of data.scores) {
+        const pct = (score.mean / 10) * 100;
+        html += `
+          <div class="score-row">
+            <span class="round-label">Round ${score.round}</span>
+            <div class="bar-container">
+              <div class="bar-fill" style="width: ${pct}%; background: ${scoreColor(score.mean)}"></div>
+              <div class="threshold-line" style="left: 75%"></div>
+              <span class="bar-value">${score.mean.toFixed(2)}</span>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    // Plan summary
+    if (data.latestPlan && data.latestPlan.plan) {
+      html += '<h3 style="font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin: 12px 0 6px;">Plan Summary</h3>';
+      html += `<div style="font-size: 12px; color: var(--text-muted); background: var(--bg); padding: 8px 12px; border-radius: 6px; white-space: pre-wrap; max-height: 200px; overflow-y: auto;">${escapeHtml(data.latestPlan.plan.executiveSummary)}</div>`;
+    }
+
+    historyDetailContent.innerHTML = html;
+  } catch {
+    // silently fail
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Session update
 // ---------------------------------------------------------------------------
 
@@ -251,6 +675,7 @@ function updateUI(session: Session) {
 
   renderAgentCards(session);
   renderScores(session);
+  renderGuidance(session.guidance ?? []);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +780,17 @@ function connectWebSocket(port: number) {
             break;
 
           case 'score':
+            fetchSession().then((s) => s && updateUI(s));
+            // Auto-refresh reviews when new scores arrive
+            fetchReviews();
+            break;
+
           case 'plan':
+            fetchSession().then((s) => s && updateUI(s));
+            // Auto-refresh plan when new plan arrives
+            fetchPlan();
+            break;
+
           case 'freshEyes':
             fetchSession().then((s) => s && updateUI(s));
             break;
@@ -399,6 +834,14 @@ function disconnect() {
   scoresChart.innerHTML = '<div style="color: var(--text-muted)">No scores yet</div>';
   liveOutput.innerHTML = '';
   agentCards.innerHTML = '<div class="empty-agents">Not connected</div>';
+  guidanceHistory.innerHTML = '';
+  planViewer.innerHTML = '<div class="empty-state">No plan yet — start a session to see the plan.</div>';
+  planRoundLabel.textContent = '';
+  reviewsList.innerHTML = '<div class="empty-state">No reviews yet.</div>';
+  reviewsRoundLabel.textContent = '';
+  councilList.innerHTML = '<div class="empty-state">Not connected.</div>';
+  historyList.innerHTML = '<div class="empty-state">Not connected.</div>';
+  historyDetail.classList.add('hidden');
 
   connectDialog.classList.remove('hidden');
   if (disconnectBtn) disconnectBtn.classList.add('hidden');
@@ -438,6 +881,10 @@ async function connect(port: number) {
     const s = await fetchSession();
     if (s) updateUI(s);
   }, 3000);
+
+  // Pre-load data for tabs the user might switch to
+  fetchCouncil();
+  fetchPlan();
 }
 
 // ---------------------------------------------------------------------------
