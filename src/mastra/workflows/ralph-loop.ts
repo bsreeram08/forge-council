@@ -550,7 +550,18 @@ export async function runRalphLoop(
       freshSpinner.start(`Fresh Eyes validation (${freshEyesAgent.name}, zero prior context)...`);
 
       try {
-        freshEyesReview = await runFreshEyes(freshEyesAgent, currentPlan, idea);
+        // runFreshEyes now uses CodeReview schema (v4) — adapt to AgentReview for legacy flow
+        const codeReview = await runFreshEyes(freshEyesAgent, [], idea);
+        freshEyesReview = {
+          agentId: freshEyesAgent.id ?? 'fresh-eyes',
+          codename: freshEyesAgent.name ?? 'Fresh Eyes',
+          dimensions: [],
+          weightedScore: codeReview.score,
+          verdict: codeReview.verdict === 'approve' ? 'approve' : 'request-changes',
+          summary: codeReview.issues.map(i => i.what).join('; ') || 'No issues found',
+          concerns: codeReview.issues.filter(i => i.severity === 'critical').map(i => i.what),
+          suggestions: codeReview.issues.filter(i => i.severity === 'suggestion').map(i => i.fix),
+        };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         freshSpinner.stop(`Fresh Eyes validation failed.`);

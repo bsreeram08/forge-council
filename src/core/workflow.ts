@@ -26,7 +26,12 @@ import { TokenCounter, estimateTokens, type TokenUsage } from './token-counter.t
 import { resolveModel, resolveModelWithFallbacks } from '../config/resolver.ts';
 import type { ForgeCouncilConfig } from '../config/schema.ts';
 import { getAgentTools } from './agent-tools.ts';
+import { reviewAndApply } from './edit-review.ts';
+import { registerBuiltinHandlers } from './pipeline-handlers.ts';
 import type { z } from 'zod';
+
+// Ensure pipeline handlers are registered for future pipeline integration
+registerBuiltinHandlers();
 
 // ---------------------------------------------------------------------------
 // ANSI color helpers (shared across display functions)
@@ -293,6 +298,18 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   // Collect all files that were created
   const allFiles = codingOutputs.flatMap(o => o.files.map(f => f.path));
   p.log.info(`Created ${allFiles.length} files across ${codingOutputs.length} commits.`);
+
+  // --- Phase 4b: EDIT REVIEW (accept/reject file changes) ---
+  if (codingOutputs.length > 0) {
+    const editReviewResult = await reviewAndApply(
+      codingOutputs,
+      projectRoot ?? process.cwd(),
+      config.editReview,
+    );
+    if (editReviewResult.rejected.length > 0) {
+      p.log.info(`Rejected ${editReviewResult.rejected.length} file(s). They will not be reviewed.`);
+    }
+  }
 
   // --- Phase 5: REVIEW ---
   p.log.step('⑤ Selecting reviewers...');

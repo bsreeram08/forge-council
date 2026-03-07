@@ -111,4 +111,68 @@ describe('API routes', () => {
     const session = sessionManager.get();
     expect(session?.guidance).toContain('Focus on tests');
   });
+
+  // --- New user action endpoints ---
+
+  test('POST /api/pick-items accepts selected item IDs', async () => {
+    sessionManager.create('test idea', 0);
+    const res = await app.request('/api/pick-items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selectedIds: ['item-1', 'item-2'] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; selectedCount: number };
+    expect(body.ok).toBe(true);
+    expect(body.selectedCount).toBe(2);
+  });
+
+  test('POST /api/pick-items returns 400 for invalid body', async () => {
+    const res = await app.request('/api/pick-items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selectedIds: 'not-an-array' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /api/fix/select accepts issue IDs', async () => {
+    sessionManager.create('test idea', 0);
+    const res = await app.request('/api/fix/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueIds: ['iss-1', 'iss-3'] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; selectedCount: number };
+    expect(body.ok).toBe(true);
+    expect(body.selectedCount).toBe(2);
+  });
+
+  test('POST /api/fix/select returns 400 for invalid body', async () => {
+    const res = await app.request('/api/fix/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueIds: 123 }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /api/pause returns ok', async () => {
+    sessionManager.create('test idea', 0);
+    const res = await app.request('/api/pause', { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; action: string };
+    expect(body.ok).toBe(true);
+    expect(body.action).toBe('pause');
+  });
+
+  test('POST /api/ship-now returns ok', async () => {
+    sessionManager.create('test idea', 0);
+    const res = await app.request('/api/ship-now', { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; action: string };
+    expect(body.ok).toBe(true);
+    expect(body.action).toBe('ship-now');
+  });
 });
