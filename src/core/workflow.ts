@@ -32,7 +32,7 @@ import type { z } from 'zod';
 // generateText with tools + structured output via submit tool
 // ---------------------------------------------------------------------------
 
-type ProgressCallback = (agentId: string, event: string, detail?: string) => void;
+import type { ProgressCallback } from './agent-display.ts';
 
 interface GenerateWithToolsOptions<T> {
   models: LanguageModel[];
@@ -155,70 +155,10 @@ function formatToolCallDetail(toolName: string, input: unknown): string {
 
 // ---------------------------------------------------------------------------
 // Live progress display for parallel agents
+// AgentDisplay provides per-agent panels with rolling tool call logs
 // ---------------------------------------------------------------------------
 
-interface AgentProgress {
-  agentId: string;
-  codename: string;
-  status: 'working' | 'done' | 'failed';
-  lastAction: string;
-  toolCalls: number;
-}
-
-function createProgressTracker(agentIds: readonly string[]): {
-  tracker: Map<string, AgentProgress>;
-  callback: ProgressCallback;
-  render: () => void;
-} {
-  const tracker = new Map<string, AgentProgress>();
-  for (const id of agentIds) {
-    const persona = loadPersona(id);
-    tracker.set(id, {
-      agentId: id,
-      codename: persona.codename,
-      status: 'working',
-      lastAction: 'starting...',
-      toolCalls: 0,
-    });
-  }
-
-  const callback: ProgressCallback = (agentId, event, detail) => {
-    const entry = tracker.get(agentId);
-    if (!entry) return;
-
-    if (event === 'tool') {
-      entry.toolCalls++;
-      entry.lastAction = detail ?? 'working...';
-    } else if (event === 'submit') {
-      entry.lastAction = 'submitting result';
-    } else if (event === 'done') {
-      entry.status = 'done';
-      entry.lastAction = detail ?? 'done';
-    } else if (event === 'failed') {
-      entry.status = 'failed';
-      entry.lastAction = detail ?? 'failed';
-    } else if (event === 'start') {
-      entry.lastAction = detail ?? 'starting...';
-    }
-
-    render();
-  };
-
-  const render = () => {
-    const lines: string[] = [];
-    for (const entry of tracker.values()) {
-      const icon = entry.status === 'done' ? '✓'
-        : entry.status === 'failed' ? '✗'
-        : '◆';
-      const calls = entry.toolCalls > 0 ? ` [${entry.toolCalls} calls]` : '';
-      lines.push(`  ${icon} ${entry.codename}: ${entry.lastAction}${calls}`);
-    }
-    // Use clack log.info to show updates — each call replaces the previous
-    p.log.info(lines.join('\n'));
-  };
-
-  return { tracker, callback, render };
-}
+import { AgentDisplay } from './agent-display.ts';
 
 // ---------------------------------------------------------------------------
 // Main v4 Workflow: Plan → Pick → Code → Review → Fix → Ship
@@ -432,7 +372,7 @@ async function runPlanningPass1(
   tokenCounter: TokenCounter,
   guidance?: string,
 ): Promise<PlanContribution[]> {
-  const { tracker, callback } = createProgressTracker(PLANNING_AGENT_IDS);
+  const display = new AgentDisplay(PLANNING_AGENT_IDS);
 
   const promises = PLANNING_AGENT_IDS.map(async (agentId) => {
     const persona = loadPersona(agentId);
@@ -457,7 +397,7 @@ async function runPlanningPass1(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
-        onProgress: callback,
+        onProgress: display.callback,
       });
 
       const inputTokens = estimateTokens(messages.map(m =>
@@ -473,15 +413,19 @@ async function runPlanningPass1(
       });
 
       const contribution = { ...result.object, agentId } as PlanContribution;
-      callback(agentId, 'done', `${contribution.items.length} items`);
+      display.callback(agentId, 'done', `${contribution.items.length} items`);
       return contribution;
     } catch (error) {
-      callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
+      display.callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
   });
 
   const results = await Promise.allSettled(promises);
+
+  // Finalize the display — replace live panels with a static summary
+  display.finalize();
+
   const contributions: PlanContribution[] = [];
 
   for (const result of results) {
@@ -655,6 +599,8 @@ async function runPlanningPass2(
   tokenCounter: TokenCounter,
   guidance?: string,
 ): Promise<{ updatedPlan: MergedPlan; contested: ContestedItem[] }> {
+  const display = new AgentDisplay(PLANNING_AGENT_IDS);
+
   const promises = PLANNING_AGENT_IDS.map(async (agentId) => {
     const persona = loadPersona(agentId);
     const models = resolveAgentModels(agentId, persona.model, config);
@@ -670,33 +616,45 @@ async function runPlanningPass2(
       userGuidance: guidance,
     });
 
-    const result = await generateWithTools<PlanChange>({
-      models,
-      outputSchema: PlanChangeSchema,
-      outputName: 'submitPlanChanges',
-      outputDescription: 'plan changes (additions and removals)',
-      messages,
-      agentId,
-      temperature: persona.temperature,
-      maxOutputTokens: persona.maxTokens,
-    });
+    try {
+      const result = await generateWithTools<PlanChange>({
+        models,
+        outputSchema: PlanChangeSchema,
+        outputName: 'submitPlanChanges',
+        outputDescription: 'plan changes (additions and removals)',
+        messages,
+        agentId,
+        temperature: persona.temperature,
+        maxOutputTokens: persona.maxTokens,
+        onProgress: display.callback,
+      });
 
-    const inputTokens = estimateTokens(messages.map(m =>
-      typeof m.content === 'string' ? m.content : ''
-    ).join(''));
-    const outputTokens = estimateTokens(JSON.stringify(result.object));
-    tokenCounter.record({
-      inputTokens,
-      outputTokens,
-      modelId: agentId,
-      phase: 'plan-pass2',
-      agentId,
-    });
+      const inputTokens = estimateTokens(messages.map(m =>
+        typeof m.content === 'string' ? m.content : ''
+      ).join(''));
+      const outputTokens = estimateTokens(JSON.stringify(result.object));
+      tokenCounter.record({
+        inputTokens,
+        outputTokens,
+        modelId: agentId,
+        phase: 'plan-pass2',
+        agentId,
+      });
 
-    return { ...result.object, agentId } as PlanChange;
+      const change = { ...result.object, agentId } as PlanChange;
+      const adds = change.additions.length;
+      const rems = change.removals.length;
+      display.callback(agentId, 'done', `+${adds} -${rems} changes`);
+      return change;
+    } catch (error) {
+      display.callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
+      throw error;
+    }
   });
 
   const results = await Promise.allSettled(promises);
+  display.finalize();
+
   const changes: PlanChange[] = [];
 
   for (const result of results) {
@@ -920,7 +878,7 @@ async function runReview(
   config: ForgeCouncilConfig,
   tokenCounter: TokenCounter,
 ): Promise<CodeReview[]> {
-  const { callback } = createProgressTracker(reviewerIds);
+  const display = new AgentDisplay(reviewerIds);
 
   const promises = reviewerIds.map(async (agentId) => {
     const persona = loadPersona(agentId);
@@ -945,7 +903,7 @@ async function runReview(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
-        onProgress: callback,
+        onProgress: display.callback,
       });
 
       const inputTokens = estimateTokens(messages.map(m =>
@@ -960,15 +918,19 @@ async function runReview(
         agentId,
       });
 
-      callback(agentId, 'done', `score: ${result.object.score}/10, ${result.object.issues.length} issues`);
+      display.callback(agentId, 'done', `score: ${result.object.score}/10, ${result.object.issues.length} issues`);
       return result.object;
     } catch (error) {
-      callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
+      display.callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
   });
 
   const results = await Promise.allSettled(promises);
+
+  // Finalize the display
+  display.finalize();
+
   const reviews: CodeReview[] = [];
 
   for (const result of results) {

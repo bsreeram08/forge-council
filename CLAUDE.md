@@ -59,11 +59,48 @@ The **intent classifier** is a cheap fast model call (~200 tokens) that runs bef
 - **Council `--council`** — All agents participate. ~$10-15/run. For critical decisions.
 - **Custom `--agents architect,security,coder`** — User picks agents.
 
+### Pipeline Engine (Configurable Phases)
+
+The workflow is driven by a **configurable pipeline** — an ordered array of phases, each declaring which agents participate, whether they run in parallel, and under what conditions. The default pipeline is the Ralph Loop, but projects can override it entirely.
+
+```
+Pipeline = Phase[] + Loop[]
+
+Phase { id, name, handler, agents[], parallel, condition, dynamicAgents }
+Loop  { startPhase, endPhase, maxRounds, exitWhen[] }
+```
+
+**Phase handlers** are registered in a global registry. Built-in: classify, plan, merge, pick, code, review, fix, ship, clarify, fresh-eyes. Custom handlers can be registered for project-specific phases.
+
+**Phase conditions**: `always`, `has-issues`, `score-below`, `input-vague`, `user-approved`, `files-changed`.
+
+**Exit conditions**: `score-threshold`, `no-issues`, `stagnation`, `max-rounds`.
+
+Pipeline state is fully serializable for **resume from any phase**.
+
+### Custom Agents
+
+Agents can be defined in JSON config files:
+- Global: `~/.forgecouncil/agents/*.json`
+- Project: `.forgecouncil/agents/*.json`
+
+Custom agents declare: id, codename, systemPrompt, skills, behavioralRules, model, temperature, phases (which pipeline phases they participate in), permission level, scoring dimensions, tool access.
+
+Project-level `agent.md` (or `.forgecouncil/agent.md`) injects extra instructions into ALL agents for project-specific context.
+
+### Edit Review (Accept/Reject Changes)
+
+AI-generated file changes go through an edit review step where the user can:
+- **Accept all** / **Reject all** — bulk actions
+- **Per-file review** — see diff, accept or reject each file
+- **Auto-accept** — small changes under a configured threshold
+- Configure via `editReview` in config: `enabled`, `autoAcceptThreshold`, `groupBy`
+
 ### Key Design Rules
 
 1. **Human authority** — No score, agent, or threshold blocks the user. The system informs, the user decides. User can force ship at any point.
 2. **Schema-only output** — All agent output is Zod-validated structured data + code files. No prose, no explanations outside the schema.
-3. **Static context** — Supporting context is assembled once before the call. No tool calls to fetch more context during generation.
+3. **Agent tool exploration** — Agents use tools (readFile, listDir, searchFiles, etc.) to explore the codebase BEFORE producing output. Uses `generateText` with tools + a submit tool for structured output.
 4. **2/3 consensus** — Pass 2 plan changes require 2 of 3 agents to agree. Contested items shown to user for manual decision.
 
 ## Key Source Files
@@ -85,6 +122,13 @@ The **intent classifier** is a cheap fast model call (~200 tokens) that runs bef
 | `src/mastra/tools/tool-registry.ts` | Tool definitions + per-agent access matrix |
 | `src/mastra/tools/tool-guard.ts` | Permission enforcement, path traversal protection |
 | `src/cli/index.ts` | CLI entry: citty commands + interactive menu |
+| `src/core/pipeline.ts` | Pipeline engine: phase definitions, executor, conditions, loops, resume |
+| `src/core/agent-loader.ts` | Custom agent loading from config files + agent.md injection |
+| `src/core/agent-tools.ts` | AI SDK tool adapters for agent tool calling |
+| `src/core/edit-review.ts` | Accept/reject AI file changes with diff display |
+| `src/core/workflow.ts` | V4 workflow: generateText + tools pattern |
+| `src/core/prompt-assembler.ts` | 4-layer prompt assembly |
+| `src/core/intent-classifier.ts` | Intent classification with keyword fallback |
 
 ## Config System
 
@@ -113,7 +157,8 @@ All agent output uses Zod schemas with strict token limits:
 
 - Always use Bun (`bun install`, `bun test`, `bun run`)
 - Tests use `bun:test` framework — colocated as `*.test.ts` next to source
-- AI SDK v6: use `LanguageModelV3` type (not `LanguageModelV1`)
+- AI SDK v6: use `LanguageModel` type (union), `inputSchema:` (not `parameters:`), `stopWhen: stepCountIs(n)` (not `maxSteps`), `tc.input` (not `tc.args`), `maxOutputTokens` (not `maxTokens`)
+- OpenAI strict schema: ALL properties must be `required` — use `.nullable().default(null)` instead of `.optional()`
 - Zod v4 (API same as v3 for basic usage)
 - Citty quirk: subcommands run alongside parent `run` handler — guard with `rawArgs` check
 - Security: chmod 0o600 on config/session files, 0o700 on dirs, localhost-only server
