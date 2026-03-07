@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ForgeCouncil</title>
+  <link rel="stylesheet" href="views://main-ui/style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="logo">
+        <span class="logo-icon">&#9878;</span>
+        <h1>ForgeCouncil</h1>
+      </div>
+      <div class="header-right">
+        <button id="disconnect-btn" class="btn-disconnect hidden">Disconnect</button>
+        <div id="status-badge" class="badge badge-disconnected">Disconnected</div>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- Session Info -->
+      <section id="session-panel" class="panel">
+        <h2>Session</h2>
+        <div id="session-info" class="info-grid">
+          <span class="label">Status</span><span id="session-status">—</span>
+          <span class="label">Round</span><span id="session-round">—</span>
+          <span class="label">Idea</span><span id="session-idea">—</span>
+        </div>
+      </section>
+
+      <!-- Agent Cards -->
+      <section id="agents-panel" class="panel">
+        <h2>Council Agents</h2>
+        <div id="agent-cards" class="card-grid"></div>
+      </section>
+
+      <!-- Scores -->
+      <section id="scores-panel" class="panel">
+        <h2>Scores</h2>
+        <div id="scores-chart"></div>
+      </section>
+
+      <!-- Live Output -->
+      <section id="output-panel" class="panel">
+        <h2>Live Output</h2>
+        <div id="live-output" class="output-log"></div>
+      </section>
+    </main>
+
+    <!-- Connection Dialog -->
+    <div id="connect-dialog" class="dialog-overlay hidden">
+      <div class="dialog">
+        <h2>Connect to Session</h2>
+        <p>Enter the port of a running ForgeCouncil session:</p>
+        <div class="input-row">
+          <input type="number" id="port-input" placeholder="e.g. 59017" min="1" max="65535">
+          <button id="connect-btn">Connect</button>
+        </div>
+        <p class="hint">Start a session with <code>forge</code> in your terminal first.</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="views://main-ui/index.js"></script>
+</body>
+</html>
