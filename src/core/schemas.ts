@@ -188,3 +188,128 @@ export const CodingOutputSchema = z.object({
 });
 
 export type CodingOutput = z.infer<typeof CodingOutputSchema>;
+
+// ---------------------------------------------------------------------------
+// Lenient → strict normalization (handles LLM garbage gracefully)
+//
+// Pattern from council/schemas.ts: accept anything, normalize to valid types.
+// ---------------------------------------------------------------------------
+
+/**
+ * Lenient PlanContribution — accepts any shape from the LLM.
+ * Use with normalizePlanContribution() to produce a valid PlanContribution.
+ */
+export const RawPlanContributionSchema = z.object({
+  agentId: z.any().optional(),
+  items: z.any().optional(),
+  techSuggestions: z.any().optional(),
+});
+
+export type RawPlanContribution = z.infer<typeof RawPlanContributionSchema>;
+
+export function normalizePlanContribution(
+  raw: Record<string, unknown>,
+  fallbackAgentId: string,
+): PlanContribution {
+  const toStr = (val: unknown): string =>
+    val == null ? '' : typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+
+  const validPriorities = ['must', 'should', 'could'] as const;
+  type Priority = typeof validPriorities[number];
+
+  const normalizeItems = (val: unknown): PlanItem[] => {
+    if (!Array.isArray(val)) return [];
+    return val
+      .filter((item): item is Record<string, unknown> => item != null && typeof item === 'object')
+      .map((item, idx) => {
+        const rawPriority = typeof item.priority === 'string' ? item.priority.toLowerCase() : '';
+        const priority: Priority = validPriorities.includes(rawPriority as Priority)
+          ? (rawPriority as Priority)
+          : 'should';
+
+        return {
+          id: typeof item.id === 'string' ? item.id : `item-${idx}`,
+          category: typeof item.category === 'string' ? item.category : 'general',
+          title: toStr(item.title).slice(0, 80),
+          description: toStr(item.description).slice(0, 200),
+          priority,
+          phase: typeof item.phase === 'number' ? item.phase : 1,
+        };
+      });
+  };
+
+  const normalizeTechSuggestions = (val: unknown): Array<{ tool: string; reason: string; alternative: string | null }> => {
+    if (!Array.isArray(val)) return [];
+    return val
+      .filter((s): s is Record<string, unknown> => s != null && typeof s === 'object')
+      .map((s) => ({
+        tool: toStr(s.tool),
+        reason: toStr(s.reason).slice(0, 100),
+        alternative: s.alternative != null ? toStr(s.alternative) : null,
+      }));
+  };
+
+  return {
+    agentId: typeof raw.agentId === 'string' ? raw.agentId : fallbackAgentId,
+    items: normalizeItems(raw.items),
+    techSuggestions: normalizeTechSuggestions(raw.techSuggestions),
+  };
+}
+
+/**
+ * Lenient CodeReview — accepts any shape from the LLM.
+ * Use with normalizeCodeReview() to produce a valid CodeReview.
+ */
+export const RawCodeReviewSchema = z.object({
+  score: z.any().optional(),
+  verdict: z.any().optional(),
+  issues: z.any().optional(),
+});
+
+export type RawCodeReview = z.infer<typeof RawCodeReviewSchema>;
+
+export function normalizeCodeReview(raw: Record<string, unknown>): CodeReview {
+  const toStr = (val: unknown): string =>
+    val == null ? '' : typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+
+  // Normalize score
+  let score = Number(raw.score);
+  if (isNaN(score)) score = 5;
+  score = Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
+
+  // Normalize verdict
+  const rawVerdict = typeof raw.verdict === 'string' ? raw.verdict.toLowerCase() : '';
+  const verdict: CodeReview['verdict'] = rawVerdict === 'approve' ? 'approve' : 'fix';
+
+  // Normalize issues
+  const validSeverities = ['critical', 'warning', 'suggestion'] as const;
+  type Severity = typeof validSeverities[number];
+
+  const normalizeIssues = (val: unknown): CodeReviewIssue[] => {
+    if (!Array.isArray(val)) return [];
+    return val
+      .filter((issue): issue is Record<string, unknown> => issue != null && typeof issue === 'object')
+      .slice(0, 10)
+      .map((issue, idx) => {
+        const rawSev = typeof issue.severity === 'string' ? issue.severity.toLowerCase() : '';
+        const severity: Severity = validSeverities.includes(rawSev as Severity)
+          ? (rawSev as Severity)
+          : 'suggestion';
+
+        return {
+          id: typeof issue.id === 'string' ? issue.id : `issue-${idx}`,
+          severity,
+          file: toStr(issue.file),
+          line: typeof issue.line === 'number' ? issue.line : null,
+          what: toStr(issue.what).slice(0, 100),
+          fix: toStr(issue.fix).slice(0, 200),
+        };
+      });
+  };
+
+  return {
+    score,
+    verdict,
+    issues: normalizeIssues(raw.issues),
+  };
+}

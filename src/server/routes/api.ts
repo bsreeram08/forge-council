@@ -93,5 +93,35 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
     return c.json({ ...session, scores, latestPlan });
   });
 
+  // --- User action endpoints (for web UI parity) ---
+
+  api.post('/api/pick-items', async (c) => {
+    const body = await c.req.json<{ selectedIds: string[] }>();
+    if (!body.selectedIds || !Array.isArray(body.selectedIds)) {
+      return c.json({ error: 'selectedIds must be an array of string IDs' }, 400);
+    }
+    sessionManager.addGuidance(`[pick-items] ${JSON.stringify(body.selectedIds)}`);
+    return c.json({ ok: true, selectedCount: body.selectedIds.length });
+  });
+
+  api.post('/api/fix/select', async (c) => {
+    const body = await c.req.json<{ issueIds: string[] }>();
+    if (!body.issueIds || !Array.isArray(body.issueIds)) {
+      return c.json({ error: 'issueIds must be an array of string IDs' }, 400);
+    }
+    sessionManager.addGuidance(`[fix-select] ${JSON.stringify(body.issueIds)}`);
+    return c.json({ ok: true, selectedCount: body.issueIds.length });
+  });
+
+  api.post('/api/pause', (_c) => {
+    sessionManager.addGuidance('[pause]');
+    return _c.json({ ok: true, action: 'pause' });
+  });
+
+  api.post('/api/ship-now', (_c) => {
+    sessionManager.addGuidance('[ship-now]');
+    return _c.json({ ok: true, action: 'ship-now' });
+  });
+
   return api;
 }

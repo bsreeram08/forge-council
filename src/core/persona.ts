@@ -444,6 +444,9 @@ Used on-demand at ship time when the user opts in.`,
 
 export const PLANNING_AGENT_IDS = ['architect', 'planner', 'researcher'] as const;
 
+// All agents for council mode (planning + review)
+export const COUNCIL_AGENT_IDS = ['architect', 'planner', 'researcher', 'reviewer', 'security', 'qa', 'integrator', 'designer'] as const;
+
 // Review agents (Ford picks 2-3 based on code content)
 export const REVIEW_AGENT_IDS = ['reviewer', 'security', 'qa', 'integrator', 'designer'] as const;
 

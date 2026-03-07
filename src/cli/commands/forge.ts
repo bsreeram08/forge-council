@@ -6,12 +6,26 @@ import { getStore } from '../../server/store.ts';
 import { exitWithError, handleError } from '../../errors/exit.ts';
 import { runWorkflow } from '../../core/workflow.ts';
 
-export async function forgeCommand(idea: string): Promise<void> {
+/** Options for the `forge` command. */
+export interface ForgeOptions {
+  /** Planning mode: 'default' (3 planners), 'council' (all agents), or 'custom' (user-selected). */
+  mode?: 'default' | 'council' | 'custom';
+  /** Agent IDs to use when mode is 'custom' (e.g. ['architect', 'security', 'coder']). */
+  agents?: string[];
+}
+
+export async function forgeCommand(idea: string, options?: ForgeOptions): Promise<void> {
   const s = p.spinner();
 
   s.start('Loading configuration...');
   const config = await loadConfig();
   s.stop('Configuration loaded.');
+
+  const mode = options?.mode ?? 'default';
+  const modeLabel = mode === 'council' ? '🏛️  Council (deep review)'
+    : mode === 'custom' ? '🎯 Custom'
+    : '🚀 Default (ship fast)';
+  p.log.info(`Mode: ${modeLabel}`);
 
   // Create and start the server
   const app = createServer(sessionManager);
@@ -37,6 +51,8 @@ export async function forgeCommand(idea: string): Promise<void> {
     const result = await runWorkflow({
       idea,
       config,
+      mode,
+      customAgentIds: options?.agents,
     });
 
     sessionManager.update({ status: 'completed' });

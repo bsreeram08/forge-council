@@ -17,7 +17,7 @@ import {
   type IntentClassification,
   type FlowPhase,
 } from './schemas.ts';
-import { loadPersona, PLANNING_AGENT_IDS } from './persona.ts';
+import { loadPersona, PLANNING_AGENT_IDS, COUNCIL_AGENT_IDS } from './persona.ts';
 import { classifyIntent, greenfieldClassification } from './intent-classifier.ts';
 import { assembleContext, formatContext, type AssembledContext } from './context-assembler.ts';
 import { buildAgentMessages } from './prompt-assembler.ts';
@@ -26,7 +26,23 @@ import { TokenCounter, estimateTokens, type TokenUsage } from './token-counter.t
 import { resolveModel, resolveModelWithFallbacks } from '../config/resolver.ts';
 import type { ForgeCouncilConfig } from '../config/schema.ts';
 import { getAgentTools } from './agent-tools.ts';
+import { reviewAndApply } from './edit-review.ts';
+import { registerBuiltinHandlers } from './pipeline-handlers.ts';
 import type { z } from 'zod';
+
+// Ensure pipeline handlers are registered for future pipeline integration
+registerBuiltinHandlers();
+
+// ---------------------------------------------------------------------------
+// ANSI color helpers (shared across display functions)
+// ---------------------------------------------------------------------------
+
+const DIM = '\x1b[2m';
+const RESET = '\x1b[0m';
+const BOLD_MAGENTA = '\x1b[1;35m';
+const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
+const RED = '\x1b[31m';
 
 // ---------------------------------------------------------------------------
 // generateText with tools + structured output via submit tool
@@ -169,6 +185,8 @@ export interface WorkflowOptions {
   config: ForgeCouncilConfig;
   projectRoot?: string;
   guidance?: string;
+  mode?: 'default' | 'council' | 'custom';
+  customAgentIds?: string[];
 }
 
 export interface WorkflowResult {
@@ -180,11 +198,18 @@ export interface WorkflowResult {
 }
 
 export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowResult> {
-  const { idea, config, projectRoot, guidance } = options;
+  const { idea, config, projectRoot, guidance, mode, customAgentIds } = options;
   const tokenCounter = new TokenCounter();
 
+  // Determine which agents to use for planning based on mode
+  const planningAgents: readonly string[] = mode === 'council'
+    ? COUNCIL_AGENT_IDS
+    : mode === 'custom' && customAgentIds?.length
+      ? customAgentIds
+      : PLANNING_AGENT_IDS;
+
   // --- Phase 1: CLASSIFY ---
-  p.log.step('Classifying intent...');
+  p.log.step('① Classifying intent...');
 
   let classification: IntentClassification = greenfieldClassification(idea);
   let context: AssembledContext;
@@ -214,16 +239,16 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   }
 
   // --- Phase 2: PLAN (Pass 1) ---
-  p.log.step('Planning — 3 agents working in parallel...');
+  p.log.step(`② Planning — ${planningAgents.length} agents drafting in parallel...`);
 
   const contributions = await runPlanningPass1(
-    idea, classification, context, config, tokenCounter, guidance,
+    idea, classification, context, config, tokenCounter, guidance, planningAgents,
   );
 
   p.log.info(`Received ${contributions.length} contributions with ${contributions.reduce((n, c) => n + c.items.length, 0)} total items.`);
 
   // --- Ford merges ---
-  p.log.step('Ford is merging contributions...');
+  p.log.step('③ Ford merging contributions...');
   let plan = await fordMerge(idea, classification, context, contributions, config, tokenCounter);
 
   // --- Phase 3: PICK (user selects items) ---
@@ -231,7 +256,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
 
   if (pickResult.action === 'refine') {
     // --- Pass 2 ---
-    p.log.step('Running Pass 2 — refining with 2/3 consensus...');
+    p.log.step('③b Running Pass 2 — refining with 2/3 consensus...');
     const pass2Result = await runPlanningPass2(
       idea, classification, context, plan, contributions, config, tokenCounter, guidance,
     );
@@ -249,7 +274,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   }
 
   // --- Phase 4: CODE ---
-  p.log.step('Carmack is coding...');
+  p.log.step('④ Carmack is coding...');
 
   // Re-classify for code phase (may need different context)
   let codeClassification: IntentClassification = classification;
@@ -274,8 +299,20 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   const allFiles = codingOutputs.flatMap(o => o.files.map(f => f.path));
   p.log.info(`Created ${allFiles.length} files across ${codingOutputs.length} commits.`);
 
+  // --- Phase 4b: EDIT REVIEW (accept/reject file changes) ---
+  if (codingOutputs.length > 0) {
+    const editReviewResult = await reviewAndApply(
+      codingOutputs,
+      projectRoot ?? process.cwd(),
+      config.editReview,
+    );
+    if (editReviewResult.rejected.length > 0) {
+      p.log.info(`Rejected ${editReviewResult.rejected.length} file(s). They will not be reviewed.`);
+    }
+  }
+
   // --- Phase 5: REVIEW ---
-  p.log.step('Selecting reviewers...');
+  p.log.step('⑤ Selecting reviewers...');
 
   const reviewSelection = selectReviewAgents(allFiles);
   p.log.info(`Reviewers: ${reviewSelection.agentIds.map(id => {
@@ -333,7 +370,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
       });
 
       if (!p.isCancel(selectedIssues) && selectedIssues.length > 0) {
-        p.log.step('Carmack is fixing issues...');
+        p.log.step('⑥ Carmack is fixing issues...');
         const issuesToFix = fixableIssues.filter(i => selectedIssues.includes(i.id));
         const fixInstructions = issuesToFix.map(i =>
           `- [${i.severity}] ${i.file}${i.line ? `:${i.line}` : ''}: ${i.what}\n  Fix: ${i.fix}`
@@ -347,7 +384,23 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   }
 
   // --- Phase 7: SHIP ---
-  p.log.step('Ship!');
+  p.log.step('⑦ Ship!');
+
+  // Ship summary
+  const totalFiles = new Set(codingOutputs?.flatMap(o => o.files.map(f => f.path)) ?? []).size;
+  const totalCommits = (codingOutputs?.length ?? 0) + fixOutputs.length;
+  const reviewScores = reviews.map(r => `${r.score}/10`).join(', ');
+  const costStr = `$${tokenCounter.estimatedCost.toFixed(2)}`;
+
+  const shipSummary = [
+    `📦 Files: ${totalFiles}`,
+    `📝 Commits: ${totalCommits}`,
+    `🔍 Reviews: ${reviews.length} (scores: ${reviewScores || 'none'})`,
+    `💰 Cost: ~${costStr}`,
+    `📊 Tokens: ${tokenCounter.totalInput.toLocaleString()} in / ${tokenCounter.totalOutput.toLocaleString()} out`,
+  ].join('\n');
+
+  p.note(shipSummary, '🚀 Ship Summary');
 
   p.note(tokenCounter.summary(), 'Token Usage');
 
@@ -371,10 +424,11 @@ async function runPlanningPass1(
   config: ForgeCouncilConfig,
   tokenCounter: TokenCounter,
   guidance?: string,
+  agentIds: readonly string[] = PLANNING_AGENT_IDS,
 ): Promise<PlanContribution[]> {
-  const display = new AgentDisplay(PLANNING_AGENT_IDS);
+  const display = new AgentDisplay(agentIds);
 
-  const promises = PLANNING_AGENT_IDS.map(async (agentId) => {
+  const promises = agentIds.map(async (agentId) => {
     const persona = loadPersona(agentId);
     const models = resolveAgentModels(agentId, persona.model, config);
 
@@ -521,12 +575,15 @@ async function userPickItems(plan: MergedPlan): Promise<PickResult> {
 
   // Show items grouped by category
   for (const cat of plan.categories ?? []) {
-    const items = cat.items.map(item => {
-      const check = item.selected ? '[x]' : '[ ]';
-      const priority = item.priority.toUpperCase().padEnd(6);
-      return `  ${check} ${priority} ${item.title} — ${item.description}`;
+    const catItems = cat.items.map(item => {
+      const check = item.selected ? '☑' : '☐';
+      const priorityColor = item.priority === 'must' ? BOLD_MAGENTA
+        : item.priority === 'should' ? YELLOW
+        : DIM;
+      const priorityLabel = `${priorityColor}[${item.priority}]${RESET}`;
+      return `  ${check} ${priorityLabel}  ${item.title}  ${DIM}(${item.source})${RESET}`;
     }).join('\n');
-    p.note(items, `${cat.name} (Phase ${cat.items[0]?.phase ?? '?'})`);
+    p.note(catItems, `📁 ${cat.name}`);
   }
 
   // Tech stack
@@ -1032,16 +1089,28 @@ async function runFix(
 
 function displayReviews(reviews: CodeReview[]): void {
   for (const review of reviews) {
-    const icon = review.verdict === 'approve' ? 'PASS' : 'FIX';
+    const scoreColor = review.score >= 8 ? GREEN
+      : review.score >= 6 ? YELLOW
+      : RED;
+    const verdictIcon = review.verdict === 'approve' ? '✓ APPROVE' : '✗ FIX';
+    const verdictColor = review.verdict === 'approve' ? GREEN : YELLOW;
+
     const lines = [
-      `Score: ${review.score}/10 | Verdict: ${icon}`,
+      `${scoreColor}${review.score}/10${RESET}  ${verdictColor}${verdictIcon}${RESET}`,
     ];
 
     if (review.issues.length > 0) {
-      lines.push(`Issues (${review.issues.length}):`);
+      lines.push('');
       for (const issue of review.issues) {
-        lines.push(`  [${issue.severity}] ${issue.file}${issue.line ? `:${issue.line}` : ''}: ${issue.what}`);
-        lines.push(`    Fix: ${issue.fix}`);
+        const icon = issue.severity === 'critical' ? '✗ CRITICAL'
+          : issue.severity === 'warning' ? '⚠ WARNING'
+          : '💡 SUGGEST';
+        const sevColor = issue.severity === 'critical' ? RED
+          : issue.severity === 'warning' ? YELLOW
+          : DIM;
+        lines.push(`  ${sevColor}${icon}${RESET}  ${issue.file}${issue.line ? `:${issue.line}` : ''}`);
+        lines.push(`    ${issue.what}`);
+        lines.push(`    → ${issue.fix}`);
       }
     }
 

@@ -4,6 +4,7 @@
 import { defineCommand, runMain } from 'citty';
 import * as p from '@clack/prompts';
 import { forgeCommand, resumeCommand } from './commands/forge.ts';
+import type { ForgeOptions } from './commands/forge.ts';
 import { statusCommand } from './commands/status.ts';
 import { steerCommand } from './commands/steer.ts';
 import { logsCommand } from './commands/logs.ts';
@@ -11,18 +12,14 @@ import { configInitCommand, configShowCommand, configWhereCommand } from './comm
 import { councilCommand } from './commands/council.ts';
 import { setupCommand } from './commands/setup.ts';
 import { sessionsCommand } from './commands/sessions.ts';
+import { historyCommand } from './commands/history.ts';
 
 const LOGO = `
-       ___
-      /   \\        ┌──────────────────────────────────────┐
-     / === \\       │       F O R G E   C O U N C I L      │
-    /  ___  \\      │                                      │
-   /  /   \\  \\     │  Plan -> Review -> Iterate -> Ship   │
-  /  / ___ \\  \\    └──────────────────────────────────────┘
- /__/_/   \\_\\__\\
-  ||  o   o  ||    Multi-Agent Engineering Council
-  ||  o   o  ||    13 agents. 3 rounds. 1 consensus.
-  ||_________||
+  ╔═══════════════════════════════════════╗
+  ║         F O R G E C O U N C I L      ║
+  ║                                       ║
+  ║   Idea → Plan → Code → Review → Ship ║
+  ╚═══════════════════════════════════════╝
 `;
 
 function clearScreen(): void {
@@ -33,14 +30,15 @@ async function interactiveMode() {
   clearScreen();
   console.log(LOGO);
 
-  p.intro('ForgeCouncil v0.1.0');
+  p.intro('ForgeCouncil v0.4.0 — Idea in → working code out');
 
   const action = await p.select({
     message: 'What would you like to do?',
     options: [
-      { value: 'run', label: 'Start a new council session', hint: 'deliberate on an idea' },
+      { value: 'run', label: 'New session — start building', hint: 'idea → plan → code → ship' },
       { value: 'resume', label: 'Resume a previous session', hint: 'continue where you left off' },
       { value: 'sessions', label: 'View session history', hint: 'list past sessions' },
+      { value: 'history', label: 'Git history', hint: 'view recent commits' },
       { value: 'setup', label: 'Setup agents & config', hint: 'configure models, agents, providers' },
       { value: 'status', label: 'View session status', hint: 'check the current session' },
       { value: 'steer', label: 'Steer active session', hint: 'inject guidance mid-loop' },
@@ -55,6 +53,21 @@ async function interactiveMode() {
 
   switch (action) {
     case 'run': {
+      // Mode selection
+      const mode = await p.select({
+        message: 'Select a mode:',
+        options: [
+          { value: 'default', label: '🚀 Default Ship', hint: '3 planners, targeted review — fast' },
+          { value: 'council', label: '🏛️  Council Deep Review', hint: 'all agents plan — thorough' },
+          { value: 'custom', label: '🎯 Custom Agents', hint: 'pick specific agents' },
+        ],
+      });
+
+      if (p.isCancel(mode)) {
+        p.cancel('Cancelled.');
+        return;
+      }
+
       const idea = await p.text({
         message: 'What do you want to build?',
         placeholder: 'e.g. "A real-time collaborative markdown editor"',
@@ -65,7 +78,23 @@ async function interactiveMode() {
         return;
       }
 
-      await forgeCommand(idea);
+      const forgeOptions: ForgeOptions = { mode: mode as ForgeOptions['mode'] };
+
+      if (mode === 'custom') {
+        const agents = await p.text({
+          message: 'Agent IDs (comma-separated):',
+          placeholder: 'e.g. architect,security,coder',
+        });
+
+        if (p.isCancel(agents)) {
+          p.cancel('Cancelled.');
+          return;
+        }
+
+        forgeOptions.agents = agents.split(',').map(a => a.trim()).filter(Boolean);
+      }
+
+      await forgeCommand(idea, forgeOptions);
       break;
     }
     case 'resume':
@@ -73,6 +102,9 @@ async function interactiveMode() {
       break;
     case 'sessions':
       await sessionsCommand();
+      break;
+    case 'history':
+      await historyCommand();
       break;
     case 'setup':
       await setupCommand();
@@ -105,8 +137,8 @@ async function interactiveMode() {
 const main = defineCommand({
   meta: {
     name: 'forge',
-    version: '0.1.0',
-    description: 'ForgeCouncil — multi-agent engineering council',
+    version: '0.4.0',
+    description: 'ForgeCouncil — Idea in → working code out',
   },
   subCommands: {
     status: defineCommand({
@@ -178,6 +210,17 @@ const main = defineCommand({
       meta: { description: 'List available council agents' },
       run: () => councilCommand(),
     }),
+    history: defineCommand({
+      meta: { description: 'Show git commit history' },
+      args: {
+        count: {
+          type: 'positional',
+          description: 'Number of commits to show (default: 20)',
+          required: false,
+        },
+      },
+      run: ({ args }) => historyCommand(args.count ? Number(args.count) : undefined),
+    }),
     setup: defineCommand({
       meta: { description: 'Alias for "forge config setup"' },
       run: () => setupCommand(),
@@ -190,7 +233,7 @@ const main = defineCommand({
 
     // Check if first argument is a subcommand
     const firstArg = rawArgs[0]!;
-    const subCommands = ['status', 'steer', 'logs', 'sessions', 'resume', 'config', 'council', 'setup', 'run'];
+    const subCommands = ['status', 'steer', 'logs', 'sessions', 'resume', 'config', 'council', 'setup', 'history', 'run'];
 
     if (!subCommands.includes(firstArg)) {
       // Treat as direct idea invocation: forge "idea here"
