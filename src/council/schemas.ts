@@ -186,7 +186,52 @@ export const ScoreCardSchema = z.object({
 
 export type ScoreCard = z.infer<typeof ScoreCardSchema>;
 
+// --- Notifications ---
+
+/**
+ * Notification — agents can request human attention/help via notifications.
+ * Displayed in both CLI (terminal bell + clack prompt) and desktop app (toast panel).
+ */
+export const NotificationSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  severity: z.enum(['info', 'warning', 'critical']),
+  title: z.string(),
+  detail: z.string(),
+  timestamp: z.string(),
+  dismissed: z.boolean(),
+  actionRequired: z.boolean(),
+  response: z.string().optional(),
+});
+
+export type Notification = z.infer<typeof NotificationSchema>;
+
 // --- Session ---
+
+/**
+ * Pending action — when set, the workflow is waiting for user input.
+ * The desktop app renders the appropriate UI and calls the corresponding API endpoint.
+ */
+export const PendingActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('pick-items'),
+    plan: z.any(), // MergedPlan — stored as-is for the desktop app
+  }),
+  z.object({
+    type: z.literal('pick-action'),
+    options: z.array(z.object({ value: z.string(), label: z.string(), hint: z.string().optional() })),
+  }),
+  z.object({
+    type: z.literal('fix-select'),
+    issues: z.array(z.any()),
+  }),
+  z.object({
+    type: z.literal('confirm'),
+    message: z.string(),
+  }),
+]);
+
+export type PendingAction = z.infer<typeof PendingActionSchema>;
 
 export const SessionSchema = z.object({
   id: z.string(),
@@ -196,6 +241,8 @@ export const SessionSchema = z.object({
   startedAt: z.string(),
   status: z.enum(['running', 'completed', 'failed', 'stopped']),
   currentRound: z.number(),
+  currentPhase: z.string().optional(),
+  pendingAction: PendingActionSchema.optional(),
   scores: z.array(
     z.object({
       round: z.number(),
@@ -205,6 +252,7 @@ export const SessionSchema = z.object({
   ),
   activeAgents: z.array(z.string()),
   guidance: z.array(z.string()).optional(),
+  notifications: z.array(NotificationSchema).optional(),
 });
 
 export type Session = z.infer<typeof SessionSchema>;

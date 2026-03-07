@@ -2,7 +2,7 @@ import { join } from 'path';
 import { mkdir, chmod } from 'fs/promises';
 import { z } from 'zod';
 import { SessionSchema } from '../council/schemas.ts';
-import type { Session } from '../council/schemas.ts';
+import type { Session, PendingAction, Notification } from '../council/schemas.ts';
 import type { PlanOutput, AgentReview, ScoreCard } from '../council/schemas.ts';
 import { getStore } from './store.ts';
 import type { LogEntry, SessionUpdate } from './store.ts';
@@ -24,25 +24,52 @@ class LogBuffer {
     this.entries = [];
   }
 
+  /** Load recent persisted logs for session into memory buffer */
+  loadRecent(sessionId: string, limit = 200): void {
+    try {
+      const rows = getStore().getRecentLogs(sessionId, limit);
+      this.sessionId = sessionId;
+      this.entries = rows.slice();
+    } catch (e) {
+      logError('logbuffer.loadRecent', e, { sessionId });
+    }
+  }
+
+  /** Clear in-memory buffer */
+  clear(): void {
+    this.entries = [];
+  }
+
   append(level: LogEntry['level'], source: string, message: string): void {
     const entry: LogEntry = {
-      id: this.entries.length + 1,
+      id: 0,
       sessionId: this.sessionId ?? '',
       timestamp: new Date().toISOString(),
       level,
       source,
       message,
     };
-    this.entries.push(entry);
 
-    // Persist to SQLite
+    // Persist to SQLite and capture assigned id
     if (this.sessionId) {
-      try { getStore().appendLog(this.sessionId, level, source, message); } catch (e) { logError('session.log-persist', e, { sessionId: this.sessionId }); }
+      try {
+        const insertedId = getStore().appendLog(this.sessionId, level, source, message);
+        if (typeof insertedId === 'number' && insertedId > 0) entry.id = insertedId;
+      } catch (e) {
+        logError('session.log-persist', e, { sessionId: this.sessionId });
+      }
     }
+
+    // If DB didn't provide an id (e.g., no session), fallback to sequential id
+    if (entry.id === 0) {
+      entry.id = this.entries.length > 0 ? this.entries[this.entries.length - 1]!.id + 1 : 1;
+    }
+
+    this.entries.push(entry);
 
     // Notify listeners (WebSocket, etc.)
     for (const listener of this.listeners) {
-      listener(entry);
+      try { listener(entry); } catch (e) { logError('logbuffer.listener', e); }
     }
   }
 
@@ -64,6 +91,7 @@ export const logBuffer = new LogBuffer();
 
 export class SessionManager {
   private session: Session | null = null;
+  private pendingResolver: ((response: unknown) => void) | null = null;
 
   create(idea: string, port: number, maxRounds = 3, scoreThreshold = 7.5, configSnapshot = '{}'): Session {
     this.session = {
@@ -85,6 +113,10 @@ export class SessionManager {
     } catch (e) { logError('session.create-persist', e, { sessionId: this.session?.id }); }
 
     logBuffer.setSession(this.session.id);
+
+    // Seed in-memory logs from DB for this session
+    try { logBuffer.loadRecent(this.session.id, 200); } catch (e) { /* ignore */ }
+
     logBuffer.append('system', 'session', `Session ${this.session.id.slice(0, 8)} created for: ${idea}`);
 
     return this.session;
@@ -164,9 +196,102 @@ export class SessionManager {
 
     getStore().updateSession(sessionId, { status: 'running', pid: process.pid });
     logBuffer.setSession(sessionId);
+
+    // Seed in-memory logs from DB
+    try { logBuffer.loadRecent(sessionId, 200); } catch (e) { /* ignore */ }
+
     logBuffer.append('system', 'session', `Session ${sessionId.slice(0, 8)} resumed from round ${stored.current_round}`);
 
     return this.session;
+  }
+
+  /**
+   * Set a pending action — indicates the workflow is waiting for user input.
+   * The desktop app will render the appropriate UI.
+   */
+  setPendingAction(action: PendingAction): void {
+    if (!this.session) return;
+    this.session.pendingAction = action;
+    logBuffer.append('system', 'session', `Waiting for user: ${action.type}`);
+  }
+
+  /**
+   * Clear the pending action and resolve the waiting promise.
+   */
+  resolvePendingAction(response: unknown): void {
+    if (!this.session) return;
+    this.session.pendingAction = undefined;
+    if (this.pendingResolver) {
+      this.pendingResolver(response);
+      this.pendingResolver = null;
+    }
+  }
+
+  /**
+   * Wait for user to respond to a pending action.
+   * Returns the response data from the API call.
+   */
+  waitForAction<T>(action: PendingAction): Promise<T> {
+    this.setPendingAction(action);
+    return new Promise<T>((resolve) => {
+      this.pendingResolver = resolve as (response: unknown) => void;
+    });
+  }
+
+  // --- Notifications ---
+
+  private notificationListeners: Set<(notification: Notification) => void> = new Set();
+
+  addNotification(partial: Omit<Notification, 'id' | 'timestamp' | 'dismissed'>): Notification {
+    if (!this.session) throw new Error('No active session');
+    const notification: Notification = {
+      ...partial,
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      dismissed: false,
+    };
+    const notifications = this.session.notifications ?? [];
+    notifications.push(notification);
+    this.session.notifications = notifications;
+    logBuffer.append('system', 'notification', `[${notification.severity}] ${notification.agentId}: ${notification.title}`);
+
+    // Notify listeners (for CLI bell, eventBus push, etc.)
+    for (const listener of this.notificationListeners) {
+      try { listener(notification); } catch (_) {}
+    }
+    return notification;
+  }
+
+  getNotifications(): Notification[] {
+    return this.session?.notifications ?? [];
+  }
+
+  dismissNotification(id: string): boolean {
+    if (!this.session?.notifications) return false;
+    const n = this.session.notifications.find(n => n.id === id);
+    if (!n) return false;
+    n.dismissed = true;
+    return true;
+  }
+
+  respondToNotification(id: string, response: string): boolean {
+    if (!this.session?.notifications) return false;
+    const n = this.session.notifications.find(n => n.id === id && n.actionRequired);
+    if (!n) return false;
+    n.response = response;
+    n.dismissed = true;
+    logBuffer.append('info', 'user', `Response to ${n.agentId}: ${response}`);
+    return true;
+  }
+
+  onNotification(callback: (notification: Notification) => void): () => void {
+    this.notificationListeners.add(callback);
+    return () => this.notificationListeners.delete(callback);
+  }
+
+  setPhase(phase: string): void {
+    if (!this.session) return;
+    this.session.currentPhase = phase;
   }
 
   async save(): Promise<void> {

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { SessionManager } from './session.ts';
 import { createApiRoutes } from './routes/api.ts';
-import { logBuffer } from './session.ts';
+import { logBuffer, sessionManager } from './session.ts';
 import { logError } from '../errors/logger.ts';
 import { eventBus } from './routes/ws.ts';
 
@@ -61,17 +61,25 @@ export function startServer(app: Hono, port: number): { port: number; server: Re
     hostname: '127.0.0.1',
   });
 
-  // Pipe log buffer to WebSocket subscribers
+  // Pipe log buffer to WebSocket subscribers (normalized envelope)
   logBuffer.onEntry((entry) => {
-    server.publish('logs', JSON.stringify({ type: 'log', data: entry }));
+    const payload = { type: 'log', data: entry };
+    server.publish('logs', JSON.stringify(payload));
+    server.publish('events', JSON.stringify(payload));
   });
 
   // Pipe eventBus events to WebSocket subscribers
-  for (const topic of ['round', 'plan', 'score', 'freshEyes', 'agent-progress'] as const) {
+  for (const topic of ['round', 'plan', 'score', 'freshEyes', 'agent-progress', 'pending-action', 'notification'] as const) {
     eventBus.subscribe(topic, (data) => {
-      server.publish('events', JSON.stringify({ type: topic, data }));
+      const payload = { type: topic, data };
+      server.publish('events', JSON.stringify(payload));
     });
   }
+
+  // Wire notification listener to eventBus
+  sessionManager.onNotification((notification) => {
+    eventBus.publish('notification', notification);
+  });
 
   return { port: server.port ?? port, server };
 }
@@ -301,6 +309,84 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     function scoreColor(s) { return s >= 7.5 ? 'var(--green)' : s >= 5 ? 'var(--yellow)' : 'var(--red)'; }
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+    // Pending action handling for embedded dashboard
+    let currentPending = null;
+    function handlePending(session) {
+      const pa = session.pendingAction;
+      if (!pa || (currentPending && JSON.stringify(currentPending) === JSON.stringify(pa))) return;
+      currentPending = pa;
+      if (pa.type === 'pick-items') {
+        // Auto-switch to plan tab and show picker
+        document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+        document.querySelector('[data-tab="pane-plan"]').classList.add('active');
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+        document.getElementById('pane-plan').classList.add('active');
+        renderPlanPicker(pa.plan);
+      }
+    }
+    function renderPlanPicker(plan) {
+      if (!plan || !plan.categories) return;
+      const selectedIds = new Set();
+      planArea.innerHTML = '';
+      // Summary
+      if (plan.summary) {
+        const sumDiv = document.createElement('div');
+        sumDiv.style.cssText = 'font-size:13px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border)';
+        sumDiv.textContent = plan.summary;
+        planArea.appendChild(sumDiv);
+      }
+      for (const cat of plan.categories) {
+        const hdr = document.createElement('div');
+        hdr.style.cssText = 'font-size:12px;font-weight:600;color:var(--accent);padding:8px 0 4px;text-transform:uppercase;letter-spacing:0.5px';
+        hdr.textContent = cat.name + ' (' + cat.items.length + ')';
+        planArea.appendChild(hdr);
+        for (const item of cat.items) {
+          if (item.selected !== false && (item.priority === 'must' || item.priority === 'should')) selectedIds.add(item.id);
+          if (item.selected === true) selectedIds.add(item.id);
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;margin-bottom:3px;cursor:pointer';
+          if (selectedIds.has(item.id)) row.style.borderColor = 'var(--green)';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = selectedIds.has(item.id);
+          cb.style.marginTop = '2px';
+          cb.dataset.itemId = item.id;
+          const txt = document.createElement('div');
+          txt.style.flex = '1';
+          const priColor = item.priority === 'must' ? 'var(--red)' : item.priority === 'should' ? 'var(--yellow)' : 'var(--muted)';
+          txt.innerHTML = '<span style="font-size:10px;font-weight:600;color:' + priColor + '">[' + esc(item.priority) + ']</span> <span style="font-size:13px">' + esc(item.title) + '</span><div style="font-size:11px;color:var(--muted)">' + esc(item.description) + '</div>';
+          row.appendChild(cb);
+          row.appendChild(txt);
+          const toggle = () => { if (selectedIds.has(item.id)) { selectedIds.delete(item.id); cb.checked = false; row.style.borderColor = 'var(--border)'; } else { selectedIds.add(item.id); cb.checked = true; row.style.borderColor = 'var(--green)'; } updateCount(); };
+          row.addEventListener('click', (e) => { if (e.target.tagName !== 'INPUT') toggle(); });
+          cb.addEventListener('change', toggle);
+          planArea.appendChild(row);
+        }
+      }
+      const countEl = document.createElement('span');
+      countEl.id = 'pick-count';
+      countEl.style.cssText = 'font-size:12px;color:var(--muted);font-family:var(--font)';
+      function updateCount() { countEl.textContent = selectedIds.size + ' selected'; }
+      updateCount();
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid var(--border)';
+      actions.appendChild(countEl);
+      const spacer = document.createElement('div');
+      spacer.style.flex = '1';
+      actions.appendChild(spacer);
+      const refBtn = document.createElement('button');
+      refBtn.textContent = 'Refine (Pass 2)';
+      refBtn.style.cssText = 'padding:6px 14px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:12px;cursor:pointer';
+      refBtn.addEventListener('click', async () => { await fetch('/api/pick-items', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({selectedIds:Array.from(selectedIds)}) }); await fetch('/api/pick-action', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'refine'}) }); currentPending=null; });
+      actions.appendChild(refBtn);
+      const appBtn = document.createElement('button');
+      appBtn.textContent = 'Approve & Code';
+      appBtn.style.cssText = 'padding:6px 14px;background:var(--accent);border:none;border-radius:6px;color:#fff;font-size:12px;cursor:pointer';
+      appBtn.addEventListener('click', async () => { await fetch('/api/pick-items', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({selectedIds:Array.from(selectedIds)}) }); await fetch('/api/pick-action', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'approve'}) }); currentPending=null; });
+      actions.appendChild(appBtn);
+      planArea.appendChild(actions);
+    }
+
     function updateSession(session) {
       if (!session) { badge.textContent = 'No Session'; badge.className = 'badge badge-stopped'; return; }
       badge.textContent = session.status.charAt(0).toUpperCase() + session.status.slice(1);
@@ -309,6 +395,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       sRound.textContent = session.currentRound;
       sId.textContent = session.id.slice(0, 8);
       sIdea.textContent = session.idea;
+
+      // Handle pending actions and notifications
+      if (session.pendingAction) handlePending(session);
+      renderNotifications(session);
 
       agentsBar.innerHTML = '';
       const active = session.activeAgents || [];
@@ -507,6 +597,55 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       } catch {}
     }
 
+    // Notification banner
+    function showNotificationBanner(n) {
+      let banner = document.getElementById('notification-banner');
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'notification-banner';
+        banner.style.cssText = 'position:fixed;bottom:16px;right:16px;max-width:380px;z-index:200;animation:slideUp 0.3s ease-out';
+        document.body.appendChild(banner);
+        const style = document.createElement('style');
+        style.textContent = '@keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}';
+        document.head.appendChild(style);
+      }
+      const sevColor = n.severity === 'critical' ? 'var(--red)' : n.severity === 'warning' ? 'var(--yellow)' : 'var(--accent)';
+      const sevBg = n.severity === 'critical' ? 'rgba(248,81,73,0.06)' : n.severity === 'warning' ? 'rgba(210,153,34,0.06)' : 'rgba(88,166,255,0.06)';
+      banner.innerHTML = '<div style="background:var(--surface);border:1px solid ' + sevColor + ';border-radius:8px;padding:12px 14px;box-shadow:0 8px 24px rgba(0,0,0,0.4);background:' + sevBg + '">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+        '<span style="font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,0.2);color:' + sevColor + ';text-transform:uppercase">' + esc(n.severity) + '</span>' +
+        '<span style="font-size:12px;font-weight:600;color:var(--accent)">' + esc(n.agentId) + '</span></div>' +
+        '<div style="font-size:13px;font-weight:600;margin-bottom:4px">' + esc(n.title) + '</div>' +
+        '<div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:8px">' + esc(n.detail.length > 150 ? n.detail.slice(0,147) + '...' : n.detail) + '</div>' +
+        (n.actionRequired ? '<div style="display:flex;gap:8px"><input id="notif-response" style="flex:1;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;outline:none" placeholder="Type response..." />' +
+        '<button onclick="respondNotification(\'' + n.id + '\')" style="padding:6px 14px;background:var(--accent);border:none;border-radius:6px;color:#fff;font-size:12px;cursor:pointer">Respond</button></div>' : '') +
+        '<button onclick="dismissNotification(\'' + n.id + '\')" style="margin-top:6px;padding:4px 10px;background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:11px;cursor:pointer">Dismiss</button>' +
+        '</div>';
+      if (n.severity === 'info') setTimeout(() => { if (banner) banner.innerHTML = ''; }, 10000);
+    }
+    window.dismissNotification = async function(id) {
+      try { await fetch('/api/notifications/' + id + '/dismiss', { method: 'POST' }); } catch {}
+      const banner = document.getElementById('notification-banner');
+      if (banner) banner.innerHTML = '';
+    };
+    window.respondNotification = async function(id) {
+      const input = document.getElementById('notif-response');
+      const response = input ? input.value.trim() : '';
+      if (!response) return;
+      try { await fetch('/api/notifications/' + id + '/respond', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({response}) }); } catch {}
+      const banner = document.getElementById('notification-banner');
+      if (banner) banner.innerHTML = '';
+    };
+
+    // Also render notifications from session data
+    function renderNotifications(session) {
+      const notifications = (session.notifications || []).filter(function(n) { return !n.dismissed; });
+      if (notifications.length > 0) {
+        // Show latest undismissed one
+        showNotificationBanner(notifications[notifications.length - 1]);
+      }
+    }
+
     // WebSocket for real-time logs
     let ws;
     function connectWS() {
@@ -516,7 +655,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'log') appendLog(msg.data);
-          if (msg.type === 'score' || msg.type === 'plan' || msg.type === 'round') poll();
+          if (msg.type === 'score' || msg.type === 'plan' || msg.type === 'round' || msg.type === 'pending-action') poll();
+          if (msg.type === 'notification' && msg.data) showNotificationBanner(msg.data);
         } catch {}
       };
       ws.onclose = () => setTimeout(connectWS, 2000);

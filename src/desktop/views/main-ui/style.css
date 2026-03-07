@@ -941,6 +941,337 @@ main {
 }
 
 /* =========================================================================
+   Session Actions
+   ========================================================================= */
+
+.session-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-secondary {
+  padding: 6px 14px;
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* =========================================================================
+   Pending Action Banner
+   ========================================================================= */
+
+.pending-action-banner {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.pending-action-banner h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.pending-action-banner p {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.pending-action-banner .action-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+/* =========================================================================
+   Plan Items Selection
+   ========================================================================= */
+
+.plan-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.plan-category-header {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  padding: 8px 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  user-select: none;
+}
+
+.plan-item:hover {
+  border-color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.plan-item.selected {
+  border-color: var(--green);
+  background: rgba(63, 185, 80, 0.04);
+}
+
+.plan-item input[type="checkbox"] {
+  margin-top: 2px;
+  accent-color: var(--green);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.plan-item-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.plan-item-title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.plan-item-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.plan-item-priority {
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.plan-item-priority.must {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--red);
+}
+
+.plan-item-priority.should {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--yellow);
+}
+
+.plan-item-priority.could {
+  background: rgba(139, 148, 158, 0.15);
+  color: var(--text-muted);
+}
+
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.plan-actions-right {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.plan-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font);
+}
+
+/* =========================================================================
+   Fix Selection (in Reviews)
+   ========================================================================= */
+
+.fix-issue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.fix-issue-item input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--yellow);
+  cursor: pointer;
+}
+
+.fix-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* =========================================================================
+   Notifications
+   ========================================================================= */
+
+.notifications-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notification-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  animation: cardIn 0.25s ease-out;
+}
+
+.notification-card.severity-critical {
+  border-color: var(--red);
+  background: rgba(248, 81, 73, 0.06);
+}
+
+.notification-card.severity-warning {
+  border-color: var(--yellow);
+  background: rgba(210, 153, 34, 0.06);
+}
+
+.notification-card.severity-info {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.notification-card.dismissed {
+  opacity: 0.5;
+}
+
+.notification-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.notification-severity {
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.notification-severity.critical {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--red);
+}
+
+.notification-severity.warning {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--yellow);
+}
+
+.notification-severity.info {
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+}
+
+.notification-agent {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.notification-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.notification-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.notification-detail {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.notification-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.notification-response-input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.notification-response-input:focus {
+  border-color: var(--accent);
+}
+
+/* Notification toast overlay for critical notifications */
+.notification-toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 200;
+  max-width: 400px;
+  animation: toastIn 0.3s ease-out;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.notification-toast .notification-card {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* =========================================================================
    Shared
    ========================================================================= */
 

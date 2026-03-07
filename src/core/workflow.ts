@@ -19,7 +19,7 @@ import {
 } from './schemas.ts';
 import { loadPersona, PLANNING_AGENT_IDS, COUNCIL_AGENT_IDS } from './persona.ts';
 import { classifyIntent, greenfieldClassification } from './intent-classifier.ts';
-import { assembleContext, formatContext, type AssembledContext } from './context-assembler.ts';
+import { assembleContext, formatContext, getSmallestContextBudget, type AssembledContext } from './context-assembler.ts';
 import { buildAgentMessages } from './prompt-assembler.ts';
 import { buildMergeInstructions, applyPass2Changes, selectReviewAgents } from './plan-merger.ts';
 import { TokenCounter, estimateTokens, type TokenUsage } from './token-counter.ts';
@@ -28,7 +28,7 @@ import type { ForgeCouncilConfig } from '../config/schema.ts';
 import { getAgentTools } from './agent-tools.ts';
 import { reviewAndApply } from './edit-review.ts';
 import { registerBuiltinHandlers } from './pipeline-handlers.ts';
-import type { z } from 'zod';
+import { z } from 'zod';
 
 // Ensure pipeline handlers are registered for future pipeline integration
 registerBuiltinHandlers();
@@ -47,8 +47,6 @@ const RED = '\x1b[31m';
 // ---------------------------------------------------------------------------
 // generateText with tools + structured output via submit tool
 // ---------------------------------------------------------------------------
-
-import type { ProgressCallback } from './agent-display.ts';
 
 interface GenerateWithToolsOptions<T> {
   models: LanguageModel[];
@@ -174,7 +172,35 @@ function formatToolCallDetail(toolName: string, input: unknown): string {
 // AgentDisplay provides per-agent panels with rolling tool call logs
 // ---------------------------------------------------------------------------
 
-import { AgentDisplay } from './agent-display.ts';
+import { AgentDisplay, type ProgressCallback } from './agent-display.ts';
+import { eventBus } from '../server/routes/ws.ts';
+import { sessionManager } from '../server/session.ts';
+import { TaskBoard } from './task-board.ts';
+import { createCommTools } from './agent-comms.ts';
+
+/**
+ * Creates a progress callback that feeds both the terminal AgentDisplay
+ * and the eventBus (for desktop/web UI).
+ */
+function createDualCallback(display: AgentDisplay): ProgressCallback {
+  return (agentId: string, event: string, detail?: string) => {
+    // Feed terminal display
+    display.callback(agentId, event, detail);
+
+    // Map event types to agent-progress WebSocket events
+    const persona = loadPersona(agentId);
+    const name = persona.codename;
+    if (event === 'start' || event === 'tool') {
+      eventBus.publish('agent-progress', { agentId, name, status: 'working', action: detail });
+    } else if (event === 'done') {
+      eventBus.publish('agent-progress', { agentId, name, status: 'done', action: detail });
+    } else if (event === 'failed') {
+      eventBus.publish('agent-progress', { agentId, name, status: 'failed', error: detail });
+    } else if (event === 'submit') {
+      eventBus.publish('agent-progress', { agentId, name, status: 'working', action: detail ?? 'producing output' });
+    }
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Main v4 Workflow: Plan → Pick → Code → Review → Fix → Ship
@@ -209,6 +235,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
       : PLANNING_AGENT_IDS;
 
   // --- Phase 1: CLASSIFY ---
+  eventBus.publish('round', { round: 0, phase: 'classifying' });
   p.log.step('① Classifying intent...');
 
   let classification: IntentClassification = greenfieldClassification(idea);
@@ -233,12 +260,20 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   p.log.info(`Type: ${classification.taskType} | Domains: ${classification.domains.join(', ')} | Complexity: ${classification.complexity}`);
 
   // --- Assemble static context ---
-  context = await assembleContext(classification, projectRoot);
+  // Budget context for the smallest model across all planning agents
+  const planningModelRefs = planningAgents.map(id => {
+    const persona = loadPersona(id);
+    const override = config.agents.overrides?.[id];
+    return override?.model?.primary ?? persona.model;
+  });
+  const smallestBudget = getSmallestContextBudget(planningModelRefs, config);
+  context = await assembleContext(classification, projectRoot, { maxTokens: smallestBudget });
   if (context.files.length > 0) {
-    p.log.info(`Loaded ${context.files.length} files (${context.totalTokens.toLocaleString()} tokens)`);
+    p.log.info(`Loaded ${context.files.length} files (${context.totalTokens.toLocaleString()} tokens, budget: ${smallestBudget.toLocaleString()})`);
   }
 
   // --- Phase 2: PLAN (Pass 1) ---
+  eventBus.publish('round', { round: 1, phase: 'planning' });
   p.log.step(`② Planning — ${planningAgents.length} agents drafting in parallel...`);
 
   const contributions = await runPlanningPass1(
@@ -248,6 +283,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   p.log.info(`Received ${contributions.length} contributions with ${contributions.reduce((n, c) => n + c.items.length, 0)} total items.`);
 
   // --- Ford merges ---
+  eventBus.publish('round', { round: 1, phase: 'merging' });
   p.log.step('③ Ford merging contributions...');
   let plan = await fordMerge(idea, classification, context, contributions, config, tokenCounter);
 
@@ -274,7 +310,14 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   }
 
   // --- Phase 4: CODE ---
-  p.log.step('④ Carmack is coding...');
+  eventBus.publish('round', { round: 1, phase: 'coding' });
+  const parallelCount = Math.min(
+    config.coding?.parallelAgents ?? 3,
+    (plan.categories ?? []).flatMap(c => c.items.filter(i => i.selected)).length,
+  );
+  p.log.step(parallelCount > 1
+    ? `④ Coding — ${parallelCount} agents in parallel...`
+    : '④ Carmack is coding...');
 
   // Re-classify for code phase (may need different context)
   let codeClassification: IntentClassification = classification;
@@ -292,7 +335,9 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
     }
   } catch { /* keep default */ }
 
-  const codeContext = await assembleContext(codeClassification, projectRoot);
+  const coderModelRef = config.agents.overrides?.['coder']?.model?.primary ?? loadPersona('coder').model;
+  const coderBudget = getSmallestContextBudget([coderModelRef], config);
+  const codeContext = await assembleContext(codeClassification, projectRoot, { maxTokens: coderBudget });
   const codingOutputs = await runCoding(idea, plan, codeClassification, codeContext, config, tokenCounter, guidance);
 
   // Collect all files that were created
@@ -312,6 +357,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   }
 
   // --- Phase 5: REVIEW ---
+  eventBus.publish('round', { round: 1, phase: 'reviewing' });
   p.log.step('⑤ Selecting reviewers...');
 
   const reviewSelection = selectReviewAgents(allFiles);
@@ -336,7 +382,12 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
     }
   } catch { /* keep default */ }
 
-  const reviewContext = await assembleContext(reviewClassification, projectRoot);
+  const reviewModelRefs = reviewSelection.agentIds.map(id => {
+    const persona = loadPersona(id);
+    return config.agents.overrides?.[id]?.model?.primary ?? persona.model;
+  });
+  const reviewBudget = getSmallestContextBudget(reviewModelRefs, config);
+  const reviewContext = await assembleContext(reviewClassification, projectRoot, { maxTokens: reviewBudget });
   const reviews = await runReview(
     idea, reviewClassification, reviewContext, reviewSelection.agentIds, config, tokenCounter,
   );
@@ -384,6 +435,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   }
 
   // --- Phase 7: SHIP ---
+  eventBus.publish('round', { round: 1, phase: 'ship' });
   p.log.step('⑦ Ship!');
 
   // Ship summary
@@ -427,6 +479,7 @@ async function runPlanningPass1(
   agentIds: readonly string[] = PLANNING_AGENT_IDS,
 ): Promise<PlanContribution[]> {
   const display = new AgentDisplay(agentIds);
+  const onProgress = createDualCallback(display);
 
   const promises = agentIds.map(async (agentId) => {
     const persona = loadPersona(agentId);
@@ -451,7 +504,7 @@ async function runPlanningPass1(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
-        onProgress: display.callback,
+        onProgress,
       });
 
       const inputTokens = estimateTokens(messages.map(m =>
@@ -467,10 +520,10 @@ async function runPlanningPass1(
       });
 
       const contribution = { ...result.object, agentId } as PlanContribution;
-      display.callback(agentId, 'done', `${contribution.items.length} items`);
+      onProgress(agentId, 'done', `${contribution.items.length} items`);
       return contribution;
     } catch (error) {
-      display.callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
+      onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
   });
@@ -657,6 +710,7 @@ async function runPlanningPass2(
   guidance?: string,
 ): Promise<{ updatedPlan: MergedPlan; contested: ContestedItem[] }> {
   const display = new AgentDisplay(PLANNING_AGENT_IDS);
+  const onProgress = createDualCallback(display);
 
   const promises = PLANNING_AGENT_IDS.map(async (agentId) => {
     const persona = loadPersona(agentId);
@@ -683,7 +737,7 @@ async function runPlanningPass2(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
-        onProgress: display.callback,
+        onProgress,
       });
 
       const inputTokens = estimateTokens(messages.map(m =>
@@ -701,10 +755,10 @@ async function runPlanningPass2(
       const change = { ...result.object, agentId } as PlanChange;
       const adds = change.additions.length;
       const rems = change.removals.length;
-      display.callback(agentId, 'done', `+${adds} -${rems} changes`);
+      onProgress(agentId, 'done', `+${adds} -${rems} changes`);
       return change;
     } catch (error) {
-      display.callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
+      onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
   });
@@ -790,7 +844,270 @@ async function resolveContestedItems(
 // Coding — Carmack implements selected plan items
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Parallel Coding — Multiple coder agents working from a shared TaskBoard
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema for what each parallel coder submits when done with ALL their tasks.
+ * This is a lightweight signal — actual file writes happen via tools during execution.
+ */
+const CoderDoneSchema = z.object({
+  tasksCompleted: z.array(z.string()),
+  totalFiles: z.number(),
+  summary: z.string().max(300),
+});
+
+/**
+ * Git commit mutex — only one agent can commit at a time to avoid conflicts.
+ */
+const gitMutex = {
+  locked: false,
+  queue: [] as (() => void)[],
+  async acquire(): Promise<void> {
+    while (this.locked) {
+      await new Promise<void>(resolve => this.queue.push(resolve));
+    }
+    this.locked = true;
+  },
+  release(): void {
+    this.locked = false;
+    const next = this.queue.shift();
+    if (next) next();
+  },
+};
+
 async function runCoding(
+  idea: string,
+  plan: MergedPlan,
+  classification: IntentClassification,
+  context: AssembledContext,
+  config: ForgeCouncilConfig,
+  tokenCounter: TokenCounter,
+  guidance?: string,
+): Promise<CodingOutput[]> {
+  const persona = loadPersona('coder');
+  const models = resolveAgentModels('coder', persona.model, config);
+
+  // Get selected items
+  const selectedItems = (plan.categories ?? [])
+    .flatMap(cat => cat.items.filter(item => item.selected))
+    .sort((a, b) => a.phase - b.phase);
+
+  if (selectedItems.length === 0) {
+    p.log.warn('No items selected for implementation.');
+    return [];
+  }
+
+  // Determine parallelism
+  const codingConfig = config.coding;
+  const parallelAgents = Math.min(
+    codingConfig?.parallelAgents ?? 3,
+    selectedItems.length, // No more agents than tasks
+  );
+
+  // Fall back to serial if only 1 agent or 1 task
+  if (parallelAgents <= 1 || selectedItems.length <= 1) {
+    return runSerialCoding(idea, plan, classification, context, config, tokenCounter, guidance);
+  }
+
+  // --- Parallel mode ---
+
+  // Create the shared task board
+  const board = new TaskBoard();
+  board.seedFromPlan(selectedItems, plan.categories ?? []);
+
+  p.log.info(`Parallel coding: ${parallelAgents} agents, ${board.totalCount} tasks (${board.getAvailableTasks().length} immediately available)`);
+
+  // Publish board events to the UI
+  board.subscribe((event) => {
+    eventBus.publish('task-board', event);
+  });
+
+  const techStackStr = plan.techStack
+    ? Object.entries(plan.techStack).map(([k, v]) => `- ${k}: ${v}`).join('\n')
+    : '';
+
+  // Spawn parallel coder agents
+  const agentIds = Array.from({ length: parallelAgents }, (_, i) => `coder-${i + 1}`);
+  const display = new AgentDisplay(agentIds);
+  const onProgress = createDualCallback(display);
+  const maxSteps = codingConfig?.maxStepsPerAgent ?? 25;
+
+  const agentPromises = agentIds.map(async (agentId) => {
+    const commTools = createCommTools(agentId, board, {
+      onHumanHelpRequest: (n) => {
+        try { sessionManager.addNotification(n); } catch (_) {}
+      },
+    });
+    const agentTools = getAgentTools('coder');
+
+    // Merge comm tools with regular coder tools
+    const allTools = { ...agentTools, ...commTools };
+
+    // Build task instructions — agent uses the board to claim tasks
+    const taskInstructions = buildParallelCoderInstructions(agentId, plan, techStackStr);
+
+    const messages = buildAgentMessages({
+      agentId: 'coder', // Use 'coder' persona for prompt assembly
+      idea,
+      phase: 'code',
+      classification,
+      context,
+      taskInstructions,
+      userGuidance: guidance,
+    });
+
+    // Add the submit tool for final signal
+    const submitTool = (await import('ai')).tool({
+      description: 'Call this when you have no more tasks to work on. Reports your final status.',
+      inputSchema: CoderDoneSchema,
+    });
+
+    try {
+      onProgress(agentId, 'start', 'checking task board');
+
+      const result = await generateText({
+        model: models[0]!,
+        messages,
+        tools: { ...allTools, coderDone: submitTool },
+        stopWhen: stepCountIs(maxSteps),
+        temperature: persona.temperature,
+        maxOutputTokens: persona.maxTokens,
+        toolChoice: 'auto',
+        experimental_onToolCallStart: (event) => {
+          const name = event.toolCall.toolName;
+          const args = event.toolCall.input;
+          if (name === 'coderDone') {
+            onProgress(agentId, 'submit', 'wrapping up');
+          } else if (name === 'claimTask' || name === 'claimNextTask') {
+            onProgress(agentId, 'tool', `claiming task`);
+          } else if (name === 'completeTask') {
+            onProgress(agentId, 'tool', `completing task`);
+          } else if (name === 'getBoard') {
+            onProgress(agentId, 'tool', 'checking board');
+          } else if (name === 'postMessage' || name === 'readMessages') {
+            onProgress(agentId, 'tool', 'communicating');
+          } else {
+            onProgress(agentId, 'tool', formatToolCallDetail(name, args));
+          }
+        },
+      });
+
+      // Count tokens
+      const inputTokens = estimateTokens(messages.map(m =>
+        typeof m.content === 'string' ? m.content : ''
+      ).join(''));
+      const outputTokens = estimateTokens(JSON.stringify(result.steps.map(s => s.toolCalls)));
+      tokenCounter.record({
+        inputTokens,
+        outputTokens,
+        modelId: 'coder',
+        phase: 'code',
+        agentId,
+      });
+
+      const agentTasks = board.getTasksByAgent(agentId).filter(t => t.status === 'done');
+      onProgress(agentId, 'done', `${agentTasks.length} tasks completed`);
+
+      return agentTasks;
+    } catch (error) {
+      onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
+      return [];
+    }
+  });
+
+  const results = await Promise.allSettled(agentPromises);
+  display.finalize();
+
+  // Collect all completed tasks into CodingOutput format
+  const outputs: CodingOutput[] = [];
+  const allCompletedTasks = board.getTasksByStatus('done');
+
+  for (const task of allCompletedTasks) {
+    if (task.producedFiles.length > 0 && task.commitMessage) {
+      outputs.push({
+        files: task.producedFiles.map(filePath => ({
+          path: filePath,
+          content: '', // Files already written to disk by writeFile tool
+          action: 'create' as const,
+        })),
+        commitMessage: task.commitMessage,
+        summary: task.summary ?? task.title,
+      });
+    }
+  }
+
+  // Report any failed/pending tasks
+  const failedTasks = board.getTasksByStatus('pending').filter(t => t.error);
+  const unfinished = board.getTasksByStatus('pending').filter(t => !t.error);
+
+  if (failedTasks.length > 0) {
+    p.log.warn(`${failedTasks.length} task(s) failed: ${failedTasks.map(t => t.title).join(', ')}`);
+  }
+  if (unfinished.length > 0) {
+    p.log.warn(`${unfinished.length} task(s) not started (blocked by dependencies or ran out of agents)`);
+  }
+
+  // Dynamic tasks summary
+  const dynamicTasks = board.getAllTasks().filter(t => t.dynamic);
+  if (dynamicTasks.length > 0) {
+    p.log.info(`${dynamicTasks.length} task(s) added dynamically by agents`);
+  }
+
+  return outputs;
+}
+
+/**
+ * Build the system instructions for a parallel coder agent.
+ * Explains the task board workflow and comm tools.
+ */
+function buildParallelCoderInstructions(
+  agentId: string,
+  plan: MergedPlan,
+  techStackStr: string,
+): string {
+  return [
+    `## Parallel Coding — Agent ${agentId}`,
+    '',
+    'You are one of several coding agents working in parallel on a shared task board.',
+    'Each task corresponds to a plan item. You claim tasks, implement them, and mark them done.',
+    '',
+    '### Workflow',
+    '1. Call `getBoard` to see all tasks and their statuses',
+    '2. Call `claimNextTask` (auto-picks highest priority) or `claimTask` (specific task)',
+    '3. Read the codebase as needed (readFile, listDir, searchFiles)',
+    '4. Write the implementation (writeFile, editFile)',
+    '5. Call `completeTask` with the files you created and a commit message',
+    '6. Check the board again — if more tasks are available, claim and implement them',
+    '7. When no more tasks are available, call `coderDone`',
+    '',
+    '### Communication',
+    '- Use `postMessage` to announce what you are working on (prevents file conflicts)',
+    '- Use `readMessages` to see what other agents are doing',
+    '- If you discover shared work needed (e.g., a utility file), use `addTask` to create it',
+    '- If you cannot complete a task, use `failTask` so another agent can try',
+    '',
+    '### Rules',
+    '- ALWAYS claim a task before implementing it',
+    '- ALWAYS complete or fail a task — never leave it in "claimed" limbo',
+    '- Write COMPLETE files with all imports, types, and implementations',
+    '- Post a message before writing to a file another agent might also touch',
+    '- Do NOT implement tasks you have not claimed',
+    '',
+    '## Tech Stack',
+    techStackStr,
+    '',
+    '## Plan Summary',
+    plan.summary ?? '',
+  ].join('\n');
+}
+
+/**
+ * Serial coding fallback — used when parallelism is 1 or only 1 task.
+ * This is the original single-Carmack behavior.
+ */
+async function runSerialCoding(
   idea: string,
   plan: MergedPlan,
   classification: IntentClassification,
@@ -803,7 +1120,6 @@ async function runCoding(
   const models = resolveAgentModels('coder', persona.model, config);
   const outputs: CodingOutput[] = [];
 
-  // Get selected items grouped by phase
   const selectedItems = (plan.categories ?? [])
     .flatMap(cat => cat.items.filter(item => item.selected))
     .sort((a, b) => a.phase - b.phase);
@@ -813,7 +1129,6 @@ async function runCoding(
     return outputs;
   }
 
-  // Build coding task — send all selected items at once for Carmack to implement
   const taskLines = selectedItems.map((item, i) =>
     `${i + 1}. [Phase ${item.phase}] ${item.title}: ${item.description}`
   );
@@ -871,7 +1186,7 @@ async function runCoding(
       agentId: 'coder',
       temperature: persona.temperature,
       maxOutputTokens: persona.maxTokens,
-      maxSteps: 20, // Coder may need many tool calls
+      maxSteps: 20,
       onProgress: coderProgress,
     });
 
@@ -936,6 +1251,7 @@ async function runReview(
   tokenCounter: TokenCounter,
 ): Promise<CodeReview[]> {
   const display = new AgentDisplay(reviewerIds);
+  const onProgress = createDualCallback(display);
 
   const promises = reviewerIds.map(async (agentId) => {
     const persona = loadPersona(agentId);
@@ -960,7 +1276,7 @@ async function runReview(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
-        onProgress: display.callback,
+        onProgress,
       });
 
       const inputTokens = estimateTokens(messages.map(m =>
@@ -975,10 +1291,10 @@ async function runReview(
         agentId,
       });
 
-      display.callback(agentId, 'done', `score: ${result.object.score}/10, ${result.object.issues.length} issues`);
+      onProgress(agentId, 'done', `score: ${result.object.score}/10, ${result.object.issues.length} issues`);
       return result.object;
     } catch (error) {
-      display.callback(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
+      onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
   });

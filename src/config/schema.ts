@@ -147,6 +147,17 @@ export const EditReviewConfigSchema = z.object({
 
 export type EditReviewConfig = z.infer<typeof EditReviewConfigSchema>;
 
+// --- Parallel coding config ---
+
+export const CodingConfigSchema = z.object({
+  /** Number of parallel coder agents (1 = serial, like before) */
+  parallelAgents: z.number().min(1).max(8).default(3),
+  /** Max tool call steps per agent */
+  maxStepsPerAgent: z.number().default(25),
+});
+
+export type CodingConfig = z.infer<typeof CodingConfigSchema>;
+
 // --- Top-level config ---
 
 export const ForgeCouncilConfigSchema = z.object({
@@ -162,6 +173,7 @@ export const ForgeCouncilConfigSchema = z.object({
   git: GitConfigSchema,
   pipeline: PipelineConfigSchema.optional(),
   editReview: EditReviewConfigSchema.optional(),
+  coding: CodingConfigSchema.optional(),
 });
 
 export type ForgeCouncilConfig = z.infer<typeof ForgeCouncilConfigSchema>;

@@ -1,5 +1,25 @@
 // ForgeCouncil Desktop UI — connects to a running session's Hono API server
 
+interface AppNotification {
+  id: string;
+  agentId: string;
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  detail: string;
+  timestamp: string;
+  dismissed: boolean;
+  actionRequired: boolean;
+  response?: string;
+}
+
+interface PendingAction {
+  type: 'pick-items' | 'pick-action' | 'fix-select' | 'confirm';
+  plan?: any;
+  options?: { value: string; label: string; hint?: string }[];
+  issues?: any[];
+  message?: string;
+}
+
 interface Session {
   id: string;
   idea: string;
@@ -8,9 +28,12 @@ interface Session {
   startedAt: string;
   status: 'running' | 'completed' | 'failed' | 'stopped';
   currentRound: number;
+  currentPhase?: string;
+  pendingAction?: PendingAction;
   scores: { round: number; mean: number; agents: Record<string, number> }[];
   activeAgents: string[];
   guidance: string[];
+  notifications?: AppNotification[];
 }
 
 interface LogEntry {
@@ -105,6 +128,10 @@ const portInput = document.getElementById('port-input') as HTMLInputElement;
 const connectBtn = document.getElementById('connect-btn')!;
 const disconnectBtn = document.getElementById('disconnect-btn');
 
+// Notifications
+const notificationsPanel = document.getElementById('notifications-panel')!;
+const notificationsList = document.getElementById('notifications-list')!;
+
 // Guidance
 const guidanceInput = document.getElementById('guidance-input') as HTMLInputElement;
 const guidanceBtn = document.getElementById('guidance-btn')!;
@@ -113,6 +140,19 @@ const guidanceHistory = document.getElementById('guidance-history')!;
 // Plan
 const planViewer = document.getElementById('plan-viewer')!;
 const planRoundLabel = document.getElementById('plan-round-label')!;
+const planPickPanel = document.getElementById('plan-pick-panel')!;
+const planItemsList = document.getElementById('plan-items-list')!;
+const planSelectAll = document.getElementById('plan-select-all')!;
+const planDeselectAll = document.getElementById('plan-deselect-all')!;
+const planSelectedCount = document.getElementById('plan-selected-count')!;
+const planApproveBtn = document.getElementById('plan-approve-btn')!;
+const planRefineBtn = document.getElementById('plan-refine-btn')!;
+
+// Session Actions
+const actionPause = document.getElementById('action-pause')!;
+const actionShip = document.getElementById('action-ship')!;
+const pendingActionPanel = document.getElementById('pending-action-panel')!;
+const pendingActionContent = document.getElementById('pending-action-content')!;
 
 // Reviews
 const reviewsList = document.getElementById('reviews-list')!;
@@ -356,6 +396,504 @@ guidanceBtn.addEventListener('click', submitGuidance);
 guidanceInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitGuidance();
 });
+
+// ---------------------------------------------------------------------------
+// Session Actions (Pause / Ship)
+// ---------------------------------------------------------------------------
+
+actionPause.addEventListener('click', async () => {
+  if (!apiBase) return;
+  try { await fetch(`${apiBase}/api/pause`, { method: 'POST' }); } catch {}
+});
+
+actionShip.addEventListener('click', async () => {
+  if (!apiBase) return;
+  try { await fetch(`${apiBase}/api/ship-now`, { method: 'POST' }); } catch {}
+});
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function renderNotifications(notifications: AppNotification[]) {
+  const active = notifications.filter(n => !n.dismissed);
+  if (active.length === 0) {
+    notificationsPanel.classList.add('hidden');
+    return;
+  }
+
+  notificationsPanel.classList.remove('hidden');
+  notificationsList.innerHTML = '';
+
+  for (const n of active) {
+    const card = document.createElement('div');
+    card.className = `notification-card severity-${n.severity}${n.dismissed ? ' dismissed' : ''}`;
+    card.dataset.notificationId = n.id;
+
+    const time = new Date(n.timestamp).toLocaleTimeString();
+
+    let html = `
+      <div class="notification-header">
+        <span class="notification-severity ${n.severity}">${n.severity}</span>
+        <span class="notification-agent">${escapeHtml(n.agentId)}</span>
+        <span class="notification-time">${time}</span>
+      </div>
+      <div class="notification-title">${escapeHtml(n.title)}</div>
+      <div class="notification-detail">${escapeHtml(n.detail)}</div>
+    `;
+
+    if (n.actionRequired && !n.response) {
+      html += `
+        <div class="notification-actions">
+          <input type="text" class="notification-response-input" placeholder="Type your response..." data-nid="${n.id}" />
+          <button class="btn-primary notification-respond-btn" data-nid="${n.id}">Respond</button>
+          <button class="btn-secondary notification-dismiss-btn" data-nid="${n.id}">Dismiss</button>
+        </div>
+      `;
+    } else {
+      html += `
+        <div class="notification-actions">
+          ${n.response ? `<span style="font-size:12px;color:var(--green)">Responded: ${escapeHtml(n.response)}</span>` : ''}
+          <button class="btn-secondary notification-dismiss-btn" data-nid="${n.id}" style="margin-left:auto">Dismiss</button>
+        </div>
+      `;
+    }
+
+    card.innerHTML = html;
+    notificationsList.appendChild(card);
+  }
+
+  // Wire dismiss buttons
+  notificationsList.querySelectorAll('.notification-dismiss-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const nid = (btn as HTMLElement).dataset.nid;
+      if (!nid || !apiBase) return;
+      try {
+        await fetch(`${apiBase}/api/notifications/${nid}/dismiss`, { method: 'POST' });
+        const card = btn.closest('.notification-card') as HTMLElement;
+        card?.remove();
+        if (notificationsList.children.length === 0) notificationsPanel.classList.add('hidden');
+      } catch {}
+    });
+  });
+
+  // Wire respond buttons
+  notificationsList.querySelectorAll('.notification-respond-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const nid = (btn as HTMLElement).dataset.nid;
+      if (!nid || !apiBase) return;
+      const input = notificationsList.querySelector(`input[data-nid="${nid}"]`) as HTMLInputElement;
+      const response = input?.value?.trim();
+      if (!response) return;
+      try {
+        await fetch(`${apiBase}/api/notifications/${nid}/respond`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ response }),
+        });
+        // Refresh
+        const session = await fetchSession();
+        if (session) renderNotifications(session.notifications ?? []);
+      } catch {}
+    });
+  });
+
+  // Enter to respond
+  notificationsList.querySelectorAll('.notification-response-input').forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if ((e as KeyboardEvent).key === 'Enter') {
+        const nid = (input as HTMLElement).dataset.nid;
+        const btn = notificationsList.querySelector(`.notification-respond-btn[data-nid="${nid}"]`) as HTMLElement;
+        btn?.click();
+      }
+    });
+  });
+}
+
+function showNotificationToast(notification: AppNotification) {
+  // Remove existing toast
+  const existing = document.querySelector('.notification-toast');
+  if (existing) existing.remove();
+  if (toastTimeout) clearTimeout(toastTimeout);
+
+  const toast = document.createElement('div');
+  toast.className = 'notification-toast';
+  const sevColor = notification.severity === 'critical' ? 'var(--red)' : notification.severity === 'warning' ? 'var(--yellow)' : 'var(--accent)';
+  toast.innerHTML = `
+    <div class="notification-card severity-${notification.severity}">
+      <div class="notification-header">
+        <span class="notification-severity ${notification.severity}">${notification.severity}</span>
+        <span class="notification-agent">${escapeHtml(notification.agentId)}</span>
+      </div>
+      <div class="notification-title">${escapeHtml(notification.title)}</div>
+      <div class="notification-detail">${escapeHtml(notification.detail.length > 150 ? notification.detail.slice(0, 147) + '...' : notification.detail)}</div>
+      <div class="notification-actions">
+        <button class="btn-primary" onclick="this.closest('.notification-toast')?.remove()">View</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(toast);
+
+  // Auto-dismiss after 10s for info, keep for warning/critical
+  const duration = notification.severity === 'info' ? 10000 : notification.severity === 'warning' ? 20000 : 0;
+  if (duration > 0) {
+    toastTimeout = setTimeout(() => toast.remove(), duration);
+  }
+
+  // Click "View" scrolls to notifications panel
+  toast.querySelector('.btn-primary')?.addEventListener('click', () => {
+    toast.remove();
+    notificationsPanel.scrollIntoView({ behavior: 'smooth' });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Pending Action Handler
+// ---------------------------------------------------------------------------
+
+let currentPendingAction: PendingAction | undefined;
+
+function handlePendingAction(action?: PendingAction) {
+  if (!action || (currentPendingAction?.type === action.type && JSON.stringify(currentPendingAction) === JSON.stringify(action))) {
+    return; // Same action, don't re-render
+  }
+  currentPendingAction = action;
+
+  switch (action.type) {
+    case 'pick-items':
+      renderPlanPicker(action.plan);
+      // Auto-switch to Plan tab
+      document.querySelectorAll('.nav-tab').forEach((t) => t.classList.remove('active'));
+      document.querySelector('[data-tab="tab-plan"]')?.classList.add('active');
+      document.querySelectorAll('.tab-content').forEach((tc) => tc.classList.remove('active'));
+      document.getElementById('tab-plan')?.classList.add('active');
+      // Show notification banner on session tab too
+      pendingActionPanel.classList.remove('hidden');
+      pendingActionContent.innerHTML = `
+        <h3>Plan Ready — Your Input Needed</h3>
+        <p>Switch to the <strong>Plan</strong> tab to select items and approve.</p>
+        <div class="action-buttons">
+          <button class="btn-primary" onclick="document.querySelector('[data-tab=\\'tab-plan\\']')?.click()">Go to Plan</button>
+        </div>
+      `;
+      break;
+
+    case 'pick-action':
+      pendingActionPanel.classList.remove('hidden');
+      const btns = (action.options ?? []).map(opt =>
+        `<button class="btn-primary pending-action-btn" data-action="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</button>`
+      ).join('');
+      pendingActionContent.innerHTML = `
+        <h3>Action Required</h3>
+        <div class="action-buttons">${btns}</div>
+      `;
+      pendingActionContent.querySelectorAll('.pending-action-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const val = (btn as HTMLElement).dataset.action;
+          try {
+            await fetch(`${apiBase}/api/pick-action`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: val }),
+            });
+          } catch {}
+          clearPendingAction();
+        });
+      });
+      break;
+
+    case 'fix-select':
+      renderFixSelector(action.issues ?? []);
+      break;
+
+    case 'confirm':
+      pendingActionPanel.classList.remove('hidden');
+      pendingActionContent.innerHTML = `
+        <h3>${escapeHtml(action.message ?? 'Confirm?')}</h3>
+        <div class="action-buttons">
+          <button class="btn-secondary" id="pending-confirm-no">No</button>
+          <button class="btn-primary" id="pending-confirm-yes">Yes</button>
+        </div>
+      `;
+      document.getElementById('pending-confirm-yes')?.addEventListener('click', async () => {
+        try {
+          await fetch(`${apiBase}/api/pick-action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'yes' }),
+          });
+        } catch {}
+        clearPendingAction();
+      });
+      document.getElementById('pending-confirm-no')?.addEventListener('click', async () => {
+        try {
+          await fetch(`${apiBase}/api/pick-action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'no' }),
+          });
+        } catch {}
+        clearPendingAction();
+      });
+      break;
+  }
+}
+
+function clearPendingAction() {
+  currentPendingAction = undefined;
+  pendingActionPanel.classList.add('hidden');
+  pendingActionContent.innerHTML = '';
+  planPickPanel.classList.add('hidden');
+}
+
+// ---------------------------------------------------------------------------
+// Plan Item Selection (Interactive Picker)
+// ---------------------------------------------------------------------------
+
+interface PlanItem {
+  id: string;
+  title: string;
+  description: string;
+  priority: string;
+  phase: number;
+  source: string;
+  selected: boolean;
+}
+
+interface PlanCategory {
+  name: string;
+  items: PlanItem[];
+}
+
+let selectedItemIds = new Set<string>();
+
+function renderPlanPicker(plan: any) {
+  if (!plan || !plan.categories) return;
+
+  planPickPanel.classList.remove('hidden');
+  planItemsList.innerHTML = '';
+  selectedItemIds.clear();
+
+  const categories: PlanCategory[] = plan.categories;
+
+  // Pre-select based on priority
+  for (const cat of categories) {
+    for (const item of cat.items) {
+      if (item.selected !== false && (item.priority === 'must' || item.priority === 'should')) {
+        selectedItemIds.add(item.id);
+      }
+      if (item.selected === true) {
+        selectedItemIds.add(item.id);
+      }
+    }
+  }
+
+  for (const cat of categories) {
+    const header = document.createElement('div');
+    header.className = 'plan-category-header';
+    header.innerHTML = `<span>📁</span> ${escapeHtml(cat.name)} <span style="color:var(--text-muted)">(${cat.items.length})</span>`;
+    planItemsList.appendChild(header);
+
+    for (const item of cat.items) {
+      const row = document.createElement('div');
+      row.className = `plan-item${selectedItemIds.has(item.id) ? ' selected' : ''}`;
+      row.dataset.itemId = item.id;
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = selectedItemIds.has(item.id);
+
+      const content = document.createElement('div');
+      content.className = 'plan-item-content';
+      content.innerHTML = `
+        <div class="plan-item-title">${escapeHtml(item.title)}</div>
+        <div class="plan-item-desc">${escapeHtml(item.description)}</div>
+      `;
+
+      const priority = document.createElement('span');
+      priority.className = `plan-item-priority ${item.priority}`;
+      priority.textContent = item.priority;
+
+      row.appendChild(checkbox);
+      row.appendChild(content);
+      row.appendChild(priority);
+
+      const toggleItem = () => {
+        if (selectedItemIds.has(item.id)) {
+          selectedItemIds.delete(item.id);
+          checkbox.checked = false;
+          row.classList.remove('selected');
+        } else {
+          selectedItemIds.add(item.id);
+          checkbox.checked = true;
+          row.classList.add('selected');
+        }
+        updateSelectedCount();
+      };
+
+      row.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement).tagName !== 'INPUT') toggleItem();
+      });
+      checkbox.addEventListener('change', toggleItem);
+
+      planItemsList.appendChild(row);
+    }
+  }
+
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  const total = planItemsList.querySelectorAll('.plan-item').length;
+  planSelectedCount.textContent = `${selectedItemIds.size}/${total} selected`;
+}
+
+// Select/deselect all
+planSelectAll.addEventListener('click', () => {
+  planItemsList.querySelectorAll('.plan-item').forEach(row => {
+    const id = (row as HTMLElement).dataset.itemId!;
+    selectedItemIds.add(id);
+    row.classList.add('selected');
+    const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    if (cb) cb.checked = true;
+  });
+  updateSelectedCount();
+});
+
+planDeselectAll.addEventListener('click', () => {
+  selectedItemIds.clear();
+  planItemsList.querySelectorAll('.plan-item').forEach(row => {
+    row.classList.remove('selected');
+    const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    if (cb) cb.checked = false;
+  });
+  updateSelectedCount();
+});
+
+// Approve and Code
+planApproveBtn.addEventListener('click', async () => {
+  if (!apiBase) return;
+  planApproveBtn.setAttribute('disabled', 'true');
+  planRefineBtn.setAttribute('disabled', 'true');
+  try {
+    await fetch(`${apiBase}/api/pick-items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selectedIds: Array.from(selectedItemIds) }),
+    });
+    // Then send approve action
+    await fetch(`${apiBase}/api/pick-action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'approve' }),
+    });
+  } catch {}
+  clearPendingAction();
+  planApproveBtn.removeAttribute('disabled');
+  planRefineBtn.removeAttribute('disabled');
+});
+
+// Refine (Pass 2)
+planRefineBtn.addEventListener('click', async () => {
+  if (!apiBase) return;
+  planApproveBtn.setAttribute('disabled', 'true');
+  planRefineBtn.setAttribute('disabled', 'true');
+  try {
+    await fetch(`${apiBase}/api/pick-items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selectedIds: Array.from(selectedItemIds) }),
+    });
+    await fetch(`${apiBase}/api/pick-action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'refine' }),
+    });
+  } catch {}
+  clearPendingAction();
+  planApproveBtn.removeAttribute('disabled');
+  planRefineBtn.removeAttribute('disabled');
+});
+
+// ---------------------------------------------------------------------------
+// Fix Issue Selector
+// ---------------------------------------------------------------------------
+
+function renderFixSelector(issues: any[]) {
+  if (!issues || issues.length === 0) return;
+
+  pendingActionPanel.classList.remove('hidden');
+  const selectedFixIds = new Set<string>();
+
+  let html = `<h3>${issues.length} Issues Found — Select to Fix</h3>`;
+  html += '<div class="fix-issue-list" style="max-height:300px;overflow-y:auto;margin-bottom:8px">';
+  for (const issue of issues) {
+    const id = issue.id ?? crypto.randomUUID();
+    const sevClass = issue.severity === 'critical' ? 'color:var(--red)' : issue.severity === 'warning' ? 'color:var(--yellow)' : 'color:var(--text-muted)';
+    html += `
+      <div class="fix-issue-item">
+        <input type="checkbox" data-issue-id="${escapeHtml(id)}" checked />
+        <div>
+          <span style="${sevClass};font-weight:600;font-size:11px">[${escapeHtml(issue.severity ?? 'issue')}]</span>
+          <span style="font-size:12px">${escapeHtml(issue.what ?? issue.title ?? '')}</span>
+          <div style="font-size:11px;color:var(--text-muted)">${escapeHtml(issue.file ?? '')}${issue.line ? ':' + issue.line : ''} — ${escapeHtml(issue.fix ?? '')}</div>
+        </div>
+      </div>
+    `;
+    selectedFixIds.add(id);
+  }
+  html += '</div>';
+  html += `<div class="fix-actions">
+    <button class="btn-secondary" id="fix-ship-btn">Ship Anyway</button>
+    <button class="btn-primary" id="fix-apply-btn">Fix Selected (${selectedFixIds.size})</button>
+  </div>`;
+
+  pendingActionContent.innerHTML = html;
+
+  // Wire checkboxes
+  pendingActionContent.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const id = (cb as HTMLElement).dataset.issueId!;
+      if ((cb as HTMLInputElement).checked) {
+        selectedFixIds.add(id);
+      } else {
+        selectedFixIds.delete(id);
+      }
+      const applyBtn = document.getElementById('fix-apply-btn');
+      if (applyBtn) applyBtn.textContent = `Fix Selected (${selectedFixIds.size})`;
+    });
+  });
+
+  document.getElementById('fix-apply-btn')?.addEventListener('click', async () => {
+    try {
+      await fetch(`${apiBase}/api/fix/select`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ issueIds: Array.from(selectedFixIds) }),
+      });
+      await fetch(`${apiBase}/api/fix/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'fix' }),
+      });
+    } catch {}
+    clearPendingAction();
+  });
+
+  document.getElementById('fix-ship-btn')?.addEventListener('click', async () => {
+    try {
+      await fetch(`${apiBase}/api/fix/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ship' }),
+      });
+    } catch {}
+    clearPendingAction();
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Plan Viewer
@@ -671,11 +1209,19 @@ function updateUI(session: Session) {
   sessionStatus.textContent = session.status;
   sessionRound.textContent = `${session.currentRound}`;
   sessionIdea.textContent = session.idea || '—';
-  phaseLabel.textContent = currentPhase || '—';
+  phaseLabel.textContent = session.currentPhase ?? currentPhase ?? '—';
 
   renderAgentCards(session);
   renderScores(session);
   renderGuidance(session.guidance ?? []);
+  renderNotifications(session.notifications ?? []);
+
+  // Handle pending actions from workflow
+  if (session.pendingAction) {
+    handlePendingAction(session.pendingAction);
+  } else if (currentPendingAction) {
+    clearPendingAction();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -792,6 +1338,18 @@ function connectWebSocket(port: number) {
           case 'freshEyes':
             fetchSession().then((s) => s && updateUI(s));
             break;
+
+          case 'pending-action':
+            if (msg.data) handlePendingAction(msg.data as PendingAction);
+            fetchSession().then((s) => s && updateUI(s));
+            break;
+
+          case 'notification':
+            if (msg.data) {
+              showNotificationToast(msg.data as AppNotification);
+              fetchSession().then((s) => s && updateUI(s));
+            }
+            break;
         }
       } catch {
         // Non-JSON message, ignore
@@ -835,6 +1393,7 @@ function disconnect() {
   guidanceHistory.innerHTML = '';
   planViewer.innerHTML = '<div class="empty-state">No plan yet — start a session to see the plan.</div>';
   planRoundLabel.textContent = '';
+  clearPendingAction();
   reviewsList.innerHTML = '<div class="empty-state">No reviews yet.</div>';
   reviewsRoundLabel.textContent = '';
   councilList.innerHTML = '<div class="empty-state">Not connected.</div>';
