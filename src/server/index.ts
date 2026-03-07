@@ -401,7 +401,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           body.textContent = s.content;
           hdr.addEventListener('click', () => {
             body.classList.toggle('collapsed');
-            hdr.querySelector('span').textContent = body.classList.contains('collapsed') ? '\\u25B8' : '\\u25BE';
+            hdr.querySelector('span').textContent = body.classList.contains('collapsed') ? '\\u25b8' : '\\u25be';
           });
           sec.appendChild(hdr);
           sec.appendChild(body);

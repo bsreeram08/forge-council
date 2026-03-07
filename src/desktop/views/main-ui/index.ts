@@ -781,13 +781,11 @@ function connectWebSocket(port: number) {
 
           case 'score':
             fetchSession().then((s) => s && updateUI(s));
-            // Auto-refresh reviews when new scores arrive
             fetchReviews();
             break;
 
           case 'plan':
             fetchSession().then((s) => s && updateUI(s));
-            // Auto-refresh plan when new plan arrives
             fetchPlan();
             break;
 

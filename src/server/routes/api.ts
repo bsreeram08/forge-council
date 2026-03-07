@@ -7,6 +7,11 @@ import { AGENT_DEFS } from '../../council/agent-registry.ts';
 export function createApiRoutes(sessionManager: SessionManager): Hono {
   const api = new Hono();
 
+  function getReviewsForRound(sessionId: string, round: number) {
+    const reviews = getStore().getReviews(sessionId, round);
+    return { round, reviews };
+  }
+
   api.get('/api/session', (c) => {
     const session = sessionManager.get();
     return c.json(session);
@@ -16,17 +21,13 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
     const round = Number(c.req.param('round'));
     const session = sessionManager.get();
     if (!session) return c.json({ round, reviews: [] });
-    const reviews = getStore().getReviews(session.id, round);
-    return c.json({ round, reviews });
+    return c.json(getReviewsForRound(session.id, round));
   });
 
-  // Reviews for the current session's latest round
   api.get('/api/reviews', (c) => {
     const session = sessionManager.get();
     if (!session) return c.json({ round: 0, reviews: [] });
-    const round = session.currentRound;
-    const reviews = getStore().getReviews(session.id, round);
-    return c.json({ round, reviews });
+    return c.json(getReviewsForRound(session.id, session.currentRound));
   });
 
   api.get('/api/plan/:round', (c) => {
