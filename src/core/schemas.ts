@@ -275,7 +275,7 @@ export function normalizeCodeReview(raw: Record<string, unknown>): CodeReview {
   // Normalize score
   let score = Number(raw.score);
   if (isNaN(score)) score = 5;
-  score = Math.min(10, Math.max(1, Math.round(score * 10) / 10));
+  score = Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
 
   // Normalize verdict
   const rawVerdict = typeof raw.verdict === 'string' ? raw.verdict.toLowerCase() : '';

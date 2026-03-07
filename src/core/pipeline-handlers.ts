@@ -75,7 +75,9 @@ const reviewHandler = async (ctx: PhaseContext): Promise<PhaseResult> => {
  * Fix handler — Carmack fixes selected issues.
  */
 const fixHandler = async (ctx: PhaseContext): Promise<PhaseResult> => {
-  const hasIssues = (ctx.state.reviews ?? []).some(r => r.issues.length > 0);
+  const hasIssues = (ctx.state.reviews ?? []).some(
+    r => r != null && Array.isArray(r.issues) && r.issues.length > 0,
+  );
   if (!hasIssues) {
     return { stateUpdates: {} };
   }

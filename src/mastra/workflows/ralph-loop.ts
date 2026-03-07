@@ -551,7 +551,13 @@ export async function runRalphLoop(
 
       try {
         // runFreshEyes now uses CodeReview schema (v4) — adapt to AgentReview for legacy flow
-        const codeReview = await runFreshEyes(freshEyesAgent, [], idea);
+        // Pass plan fields as code context since the legacy flow doesn't have coding outputs
+        const planSummary = [
+          currentPlan.executiveSummary,
+          currentPlan.architecture,
+          currentPlan.phasedRoadmap,
+        ].filter(Boolean);
+        const codeReview = await runFreshEyes(freshEyesAgent, planSummary, idea);
         freshEyesReview = {
           agentId: freshEyesAgent.id ?? 'fresh-eyes',
           codename: freshEyesAgent.name ?? 'Fresh Eyes',
