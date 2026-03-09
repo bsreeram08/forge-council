@@ -66,6 +66,35 @@ interface AgentState {
   expanded: boolean;
 }
 
+// --- Task Board (parallel coding) ---
+
+interface TaskBoardSnapshot {
+  total: number;
+  pending: number;
+  claimed: number;
+  done: number;
+  failed: number;
+  tasks: Array<{
+    id: string;
+    title: string;
+    status: 'pending' | 'claimed' | 'done' | 'failed';
+    claimedBy: string | null;
+    phase: number;
+    priority: string;
+    producedFiles: string[];
+  }>;
+  recentMessages: Array<{
+    from: string;
+    content: string;
+    taskId: string | null;
+  }>;
+}
+
+interface TaskBoardResponse {
+  active: boolean;
+  board: TaskBoardSnapshot | null;
+}
+
 interface AgentDef {
   id: string;
   name: string;
@@ -127,6 +156,12 @@ const connectDialog = document.getElementById('connect-dialog')!;
 const portInput = document.getElementById('port-input') as HTMLInputElement;
 const connectBtn = document.getElementById('connect-btn')!;
 const disconnectBtn = document.getElementById('disconnect-btn');
+
+// Task Board
+const taskBoardPanel = document.getElementById('task-board-panel')!;
+const taskBoardSummary = document.getElementById('task-board-summary')!;
+const taskBoardTasks = document.getElementById('task-board-tasks')!;
+const taskBoardMessages = document.getElementById('task-board-messages')!;
 
 // Notifications
 const notificationsPanel = document.getElementById('notifications-panel')!;
@@ -196,6 +231,225 @@ function statusIcon(status: AgentState['status']): string {
     case 'done': return '<span class="status-dot done"></span>';
     case 'failed': return '<span class="status-dot failed"></span>';
     default: return '<span class="status-dot idle"></span>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task Board Rendering
+// ---------------------------------------------------------------------------
+
+let lastBoardSnapshot: TaskBoardSnapshot | null = null;
+/** Track previous task statuses for claim/complete animations */
+let prevTaskStatuses = new Map<string, string>();
+
+function taskStatusIcon(status: string): string {
+  switch (status) {
+    case 'done': return '<span class="task-status-icon done">&#10003;</span>';
+    case 'claimed': return '<span class="task-status-icon claimed">&#9679;</span>';
+    case 'failed': return '<span class="task-status-icon failed">&#10007;</span>';
+    default: return '<span class="task-status-icon pending">&#9675;</span>';
+  }
+}
+
+function taskPriorityClass(priority: string): string {
+  if (priority === 'must') return 'priority-must';
+  if (priority === 'should') return 'priority-should';
+  return 'priority-could';
+}
+
+/** Agent color palette for visual differentiation */
+const AGENT_COLORS = [
+  { bg: 'rgba(88, 166, 255, 0.08)', border: '#58a6ff', text: '#58a6ff' },   // blue
+  { bg: 'rgba(210, 153, 34, 0.08)', border: '#d29922', text: '#d29922' },    // amber
+  { bg: 'rgba(163, 113, 247, 0.08)', border: '#a371f7', text: '#a371f7' },   // purple
+  { bg: 'rgba(63, 185, 80, 0.08)', border: '#3fb950', text: '#3fb950' },     // green
+  { bg: 'rgba(248, 81, 73, 0.08)', border: '#f85149', text: '#f85149' },     // red
+];
+const agentColorMap = new Map<string, typeof AGENT_COLORS[0]>();
+let nextColorIndex = 0;
+
+function getAgentColor(agentId: string) {
+  let color = agentColorMap.get(agentId);
+  if (!color) {
+    color = AGENT_COLORS[nextColorIndex % AGENT_COLORS.length]!;
+    agentColorMap.set(agentId, color);
+    nextColorIndex++;
+  }
+  return color;
+}
+
+function renderTaskBoard(snapshot: TaskBoardSnapshot) {
+  lastBoardSnapshot = snapshot;
+  taskBoardPanel.classList.remove('hidden');
+
+  // Summary bar with progress ring
+  const pct = snapshot.total > 0 ? Math.round((snapshot.done / snapshot.total) * 100) : 0;
+  const circumference = 2 * Math.PI * 18;
+  const dashOffset = circumference - (pct / 100) * circumference;
+
+  taskBoardSummary.innerHTML = `
+    <div class="board-header-row">
+      <div class="board-progress-ring">
+        <svg width="48" height="48" viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="18" fill="none" stroke="var(--border)" stroke-width="4" />
+          <circle cx="24" cy="24" r="18" fill="none" stroke="var(--green)" stroke-width="4"
+            stroke-dasharray="${circumference}" stroke-dashoffset="${dashOffset}"
+            stroke-linecap="round" transform="rotate(-90 24 24)"
+            style="transition: stroke-dashoffset 0.6s ease" />
+        </svg>
+        <span class="ring-label">${pct}%</span>
+      </div>
+      <div class="board-header-stats">
+        <div class="board-header-title">${snapshot.done}/${snapshot.total} tasks complete</div>
+        <div class="board-stats">
+          <span class="board-stat"><span class="board-stat-dot pending"></span>${snapshot.pending} queued</span>
+          <span class="board-stat"><span class="board-stat-dot claimed"></span>${snapshot.claimed} active</span>
+          <span class="board-stat"><span class="board-stat-dot done"></span>${snapshot.done} done</span>
+          ${snapshot.failed > 0 ? `<span class="board-stat"><span class="board-stat-dot failed"></span>${snapshot.failed} failed</span>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // --- Agent Lanes ---
+  // Group tasks by agent (claimed/done), plus an "unassigned" pool for pending tasks
+  const agentTasks = new Map<string, typeof snapshot.tasks>();
+  const unassigned: typeof snapshot.tasks = [];
+
+  for (const task of snapshot.tasks) {
+    if (task.claimedBy) {
+      const list = agentTasks.get(task.claimedBy) ?? [];
+      list.push(task);
+      agentTasks.set(task.claimedBy, list);
+    } else {
+      unassigned.push(task);
+    }
+  }
+
+  taskBoardTasks.innerHTML = '';
+
+  // Render each agent's lane
+  for (const [agentId, tasks] of agentTasks) {
+    const state = agentStates.get(agentId);
+    const name = state?.name ?? agentId;
+    const color = getAgentColor(agentId);
+    const action = state?.actions.length ? state.actions[state.actions.length - 1]! : '';
+    const activeTasks = tasks.filter(t => t.status === 'claimed');
+    const doneTasks = tasks.filter(t => t.status === 'done');
+    const failedTasks = tasks.filter(t => t.status === 'failed');
+    const totalFiles = tasks.reduce((n, t) => n + t.producedFiles.length, 0);
+
+    const lane = document.createElement('div');
+    lane.className = 'agent-lane';
+    lane.style.borderColor = color.border;
+
+    let laneHtml = `
+      <div class="agent-lane-header">
+        <span class="status-dot ${state?.status === 'done' ? 'done' : state?.status === 'failed' ? 'failed' : 'pulse'}" style="background: ${color.border}"></span>
+        <span class="agent-lane-name" style="color: ${color.text}">${escapeHtml(name)}</span>
+        <span class="agent-lane-stats">
+          ${activeTasks.length > 0 ? `<span class="lane-stat active">${activeTasks.length} active</span>` : ''}
+          ${doneTasks.length > 0 ? `<span class="lane-stat done">${doneTasks.length} done</span>` : ''}
+          ${failedTasks.length > 0 ? `<span class="lane-stat failed">${failedTasks.length} failed</span>` : ''}
+          ${totalFiles > 0 ? `<span class="lane-stat files">${totalFiles} files</span>` : ''}
+        </span>
+      </div>
+    `;
+
+    // Current action
+    if (action && state?.status === 'working') {
+      laneHtml += `<div class="agent-lane-action">${escapeHtml(action)}</div>`;
+    }
+
+    // Task list within lane
+    laneHtml += '<div class="agent-lane-tasks">';
+    // Active (claimed) first, then done
+    const ordered = [...activeTasks, ...doneTasks, ...failedTasks];
+    for (const task of ordered) {
+      const prevStatus = prevTaskStatuses.get(task.id);
+      const justClaimed = prevStatus === 'pending' && task.status === 'claimed';
+      const justDone = prevStatus === 'claimed' && task.status === 'done';
+      const animClass = justClaimed ? ' task-claim-anim' : justDone ? ' task-done-anim' : '';
+
+      laneHtml += `
+        <div class="task-row task-${task.status}${animClass}" data-task-id="${escapeHtml(task.id)}">
+          ${taskStatusIcon(task.status)}
+          <span class="task-title">${escapeHtml(task.title)}</span>
+          ${task.producedFiles.length > 0 ? `<span class="task-files">${task.producedFiles.length} file${task.producedFiles.length !== 1 ? 's' : ''}</span>` : ''}
+        </div>
+      `;
+    }
+    laneHtml += '</div>';
+
+    lane.innerHTML = laneHtml;
+    taskBoardTasks.appendChild(lane);
+  }
+
+  // Unassigned / pending pool
+  if (unassigned.length > 0) {
+    const pool = document.createElement('div');
+    pool.className = 'task-pool';
+
+    let poolHtml = `<div class="task-pool-header">
+      <span class="task-pool-label">Queued</span>
+      <span class="task-pool-count">${unassigned.length} task${unassigned.length !== 1 ? 's' : ''}</span>
+    </div><div class="task-pool-list">`;
+
+    for (const task of unassigned) {
+      poolHtml += `
+        <div class="task-row task-pending" data-task-id="${escapeHtml(task.id)}">
+          ${taskStatusIcon('pending')}
+          <span class="task-priority ${taskPriorityClass(task.priority)}">${escapeHtml(task.priority)}</span>
+          <span class="task-title">${escapeHtml(task.title)}</span>
+          <span class="task-phase">Phase ${task.phase}</span>
+        </div>
+      `;
+    }
+    poolHtml += '</div>';
+    pool.innerHTML = poolHtml;
+    taskBoardTasks.appendChild(pool);
+  }
+
+  // Recent messages
+  if (snapshot.recentMessages.length > 0) {
+    taskBoardMessages.innerHTML = '<div class="board-messages-header">Agent Comms</div>';
+    for (const msg of snapshot.recentMessages.slice(-5)) {
+      const fromColor = getAgentColor(msg.from);
+      const msgEl = document.createElement('div');
+      msgEl.className = 'board-message';
+      msgEl.innerHTML = `<span class="board-msg-from" style="color:${fromColor.text}">${escapeHtml(msg.from)}</span> ${escapeHtml(msg.content)}`;
+      taskBoardMessages.appendChild(msgEl);
+    }
+  } else {
+    taskBoardMessages.innerHTML = '';
+  }
+
+  // Save current statuses for next render's animation detection
+  prevTaskStatuses.clear();
+  for (const task of snapshot.tasks) {
+    prevTaskStatuses.set(task.id, task.status);
+  }
+}
+
+function hideTaskBoard() {
+  lastBoardSnapshot = null;
+  prevTaskStatuses.clear();
+  taskBoardPanel.classList.add('hidden');
+}
+
+async function fetchTaskBoard() {
+  if (!apiBase) return;
+  try {
+    const res = await fetch(`${apiBase}/api/task-board`);
+    if (!res.ok) return;
+    const data: TaskBoardResponse = await res.json();
+    if (data.active && data.board) {
+      renderTaskBoard(data.board);
+    } else {
+      hideTaskBoard();
+    }
+  } catch {
+    // silently fail
   }
 }
 
@@ -566,10 +820,7 @@ function handlePendingAction(action?: PendingAction) {
     case 'pick-items':
       renderPlanPicker(action.plan);
       // Auto-switch to Plan tab
-      document.querySelectorAll('.nav-tab').forEach((t) => t.classList.remove('active'));
-      document.querySelector('[data-tab="tab-plan"]')?.classList.add('active');
-      document.querySelectorAll('.tab-content').forEach((tc) => tc.classList.remove('active'));
-      document.getElementById('tab-plan')?.classList.add('active');
+      switchToTab('tab-plan');
       // Show notification banner on session tab too
       pendingActionPanel.classList.remove('hidden');
       pendingActionContent.innerHTML = `
@@ -1268,12 +1519,33 @@ function handleAgentProgress(data: AgentProgress) {
   if (lastSession) {
     renderAgentCards(lastSession);
   }
+
+  // Also refresh task board so agent lanes show live activity
+  if (lastBoardSnapshot) {
+    renderTaskBoard(lastBoardSnapshot);
+  }
+}
+
+function switchToTab(tabId: string) {
+  document.querySelectorAll('.nav-tab').forEach((t) => t.classList.remove('active'));
+  document.querySelector(`[data-tab="${tabId}"]`)?.classList.add('active');
+  document.querySelectorAll('.tab-content').forEach((tc) => tc.classList.remove('active'));
+  document.getElementById(tabId)?.classList.add('active');
 }
 
 function handleRoundEvent(data: { round: number; phase: string }) {
   currentPhase = data.phase;
   // Reset agent states for new phase
   agentStates.clear();
+
+  // Auto-switch tabs based on phase
+  if (data.phase === 'code' || data.phase === 'fix') {
+    switchToTab('tab-session'); // task board is on session tab
+  } else if (data.phase === 'review') {
+    switchToTab('tab-reviews');
+    fetchReviews();
+  }
+
   if (lastSession) {
     updateUI(lastSession);
   }
@@ -1350,6 +1622,11 @@ function connectWebSocket(port: number) {
               fetchSession().then((s) => s && updateUI(s));
             }
             break;
+
+          case 'task-board':
+            // Task board events come as BoardEvent — refresh the full snapshot
+            fetchTaskBoard();
+            break;
         }
       } catch {
         // Non-JSON message, ignore
@@ -1394,6 +1671,7 @@ function disconnect() {
   planViewer.innerHTML = '<div class="empty-state">No plan yet — start a session to see the plan.</div>';
   planRoundLabel.textContent = '';
   clearPendingAction();
+  hideTaskBoard();
   reviewsList.innerHTML = '<div class="empty-state">No reviews yet.</div>';
   reviewsRoundLabel.textContent = '';
   councilList.innerHTML = '<div class="empty-state">Not connected.</div>';
@@ -1437,11 +1715,13 @@ async function connect(port: number) {
   pollInterval = setInterval(async () => {
     const s = await fetchSession();
     if (s) updateUI(s);
+    fetchTaskBoard();
   }, 3000);
 
   // Pre-load data for tabs the user might switch to
   fetchCouncil();
   fetchPlan();
+  fetchTaskBoard();
 }
 
 // ---------------------------------------------------------------------------

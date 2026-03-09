@@ -92,6 +92,17 @@ export const logBuffer = new LogBuffer();
 export class SessionManager {
   private session: Session | null = null;
   private pendingResolver: ((response: unknown) => void) | null = null;
+  private _taskBoard: import('../core/task-board.ts').TaskBoard | null = null;
+
+  /** Set the active task board (called by workflow during parallel coding) */
+  setTaskBoard(board: import('../core/task-board.ts').TaskBoard | null): void {
+    this._taskBoard = board;
+  }
+
+  /** Get the active task board snapshot (null if not in parallel coding phase) */
+  getTaskBoardSnapshot(): import('../core/task-board.ts').BoardSnapshot | null {
+    return this._taskBoard?.snapshot() ?? null;
+  }
 
   create(idea: string, port: number, maxRounds = 3, scoreThreshold = 7.5, configSnapshot = '{}'): Session {
     this.session = {
@@ -145,13 +156,28 @@ export class SessionManager {
     }
   }
 
-  addGuidance(text: string): void {
+  addGuidance(text: string, agentId?: string): void {
     if (!this.session) return;
-    const guidance = this.session.guidance ?? [];
-    guidance.push(text);
-    this.session.guidance = guidance;
-    try { getStore().updateGuidance(this.session.id, guidance); } catch (e) { logError('session.guidance-persist', e, { sessionId: this.session.id }); }
-    logBuffer.append('info', 'user', `Guidance added: ${text}`);
+    if (agentId) {
+      // Per-agent guidance
+      const agentGuidance = this.session.agentGuidance ?? {};
+      const list = agentGuidance[agentId] ?? [];
+      list.push(text);
+      agentGuidance[agentId] = list;
+      this.session.agentGuidance = agentGuidance;
+      logBuffer.append('info', 'user', `Guidance for ${agentId}: ${text}`);
+    } else {
+      // Global guidance
+      const guidance = this.session.guidance ?? [];
+      guidance.push(text);
+      this.session.guidance = guidance;
+      try { getStore().updateGuidance(this.session.id, guidance); } catch (e) { logError('session.guidance-persist', e, { sessionId: this.session.id }); }
+      logBuffer.append('info', 'user', `Guidance added: ${text}`);
+    }
+  }
+
+  getAgentGuidance(agentId: string): string[] {
+    return this.session?.agentGuidance?.[agentId] ?? [];
   }
 
   savePlan(round: number, plan: PlanOutput): void {

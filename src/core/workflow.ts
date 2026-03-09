@@ -25,7 +25,7 @@ import { buildMergeInstructions, applyPass2Changes, selectReviewAgents } from '.
 import { TokenCounter, estimateTokens, type TokenUsage } from './token-counter.ts';
 import { resolveModel, resolveModelWithFallbacks } from '../config/resolver.ts';
 import type { ForgeCouncilConfig } from '../config/schema.ts';
-import { getAgentTools } from './agent-tools.ts';
+import { getAgentTools, resetToolTracking, setProjectRoot } from './agent-tools.ts';
 import { reviewAndApply } from './edit-review.ts';
 import { registerBuiltinHandlers } from './pipeline-handlers.ts';
 import { z } from 'zod';
@@ -59,6 +59,7 @@ interface GenerateWithToolsOptions<T> {
   maxOutputTokens?: number;
   maxSteps?: number;
   onProgress?: ProgressCallback;
+  abortSignal?: AbortSignal;
 }
 
 async function generateWithTools<T>(
@@ -67,8 +68,11 @@ async function generateWithTools<T>(
   const {
     models, outputSchema, outputName, outputDescription,
     messages, agentId, temperature, maxOutputTokens,
-    maxSteps = 10, onProgress,
+    maxSteps = 10, onProgress, abortSignal,
   } = options;
+
+  // Reset read tracking for this agent invocation
+  resetToolTracking();
 
   // Get the agent's allowed tools
   const agentTools = getAgentTools(agentId);
@@ -87,46 +91,94 @@ async function generateWithTools<T>(
   const errors: string[] = [];
 
   for (const model of models) {
-    try {
-      onProgress?.(agentId, 'start', `using ${models.indexOf(model) === 0 ? 'primary' : 'fallback'} model`);
+    // Allow up to 2 attempts per model: first normal, then with a nudge if it didn't submit
+    const modelLabel = (model as any).modelId ?? `model-${models.indexOf(model)}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const isRetry = attempt > 0;
+        if (!isRetry) {
+          onProgress?.(agentId, 'start', `using ${models.indexOf(model) === 0 ? 'primary' : 'fallback'}: ${modelLabel}`);
+        } else {
+          onProgress?.(agentId, 'start', `retrying ${modelLabel} with submit nudge`);
+        }
 
-      const result = await generateText({
-        model,
-        messages,
-        tools: allTools,
-        stopWhen: stepCountIs(maxSteps),
-        temperature,
-        maxOutputTokens,
-        toolChoice: 'auto',
-        experimental_onToolCallStart: (event) => {
-          const name = event.toolCall.toolName;
-          const args = event.toolCall.input;
-          if (name === outputName) {
-            onProgress?.(agentId, 'submit', 'producing structured output');
-          } else {
-            const detail = formatToolCallDetail(name, args);
-            onProgress?.(agentId, 'tool', detail);
-          }
-        },
-      });
+        // Doom loop detection
+        const recentCalls: Array<{ name: string; hash: string }> = [];
 
-      // Find the submit tool call in the steps
-      for (const step of result.steps) {
-        for (const tc of step.toolCalls) {
-          if (tc.toolName === outputName && 'input' in tc) {
-            return { object: tc.input as T, modelUsed: model };
+        // On retry, append a nudge message telling the model to call submit NOW
+        const attemptMessages = isRetry
+          ? [
+              ...messages,
+              { role: 'user' as const, content: `You ran out of steps without calling ${outputName}. You MUST call the ${outputName} tool NOW with your result. Do not make any more exploration calls — submit immediately with the information you have.` },
+            ]
+          : messages;
+
+        const result = await generateText({
+          model,
+          messages: attemptMessages,
+          tools: allTools,
+          stopWhen: stepCountIs(isRetry ? 3 : maxSteps),
+          temperature,
+          maxOutputTokens,
+          toolChoice: 'auto',
+          abortSignal,
+          experimental_onToolCallStart: (event) => {
+            const name = event.toolCall.toolName;
+            const args = event.toolCall.input;
+
+            // Track for doom loop detection
+            const hash = JSON.stringify(args);
+            recentCalls.push({ name, hash });
+            if (recentCalls.length >= 3) {
+              const last3 = recentCalls.slice(-3);
+              if (last3.every(c => c.name === last3[0]!.name && c.hash === last3[0]!.hash)) {
+                onProgress?.(agentId, 'warning', `Doom loop: ${last3[0]!.name} called 3x with identical input`);
+              }
+            }
+
+            if (name === outputName) {
+              onProgress?.(agentId, 'submit', 'producing structured output');
+            } else {
+              const detail = formatToolCallDetail(name, args);
+              onProgress?.(agentId, 'tool', detail);
+            }
+          },
+        });
+
+        // Tool call summary
+        const toolNames = result.steps.flatMap(s => s.toolCalls.map(tc => tc.toolName));
+        const editCount = toolNames.filter(n => n === 'editFile').length;
+        onProgress?.(agentId, 'tool-summary', `${toolNames.length} tool calls${editCount > 0 ? ` (${editCount} edits)` : ''}`);
+
+        // Find the submit tool call in the steps
+        for (const step of result.steps) {
+          for (const tc of step.toolCalls) {
+            if (tc.toolName === outputName && 'input' in tc) {
+              return { object: tc.input as T, modelUsed: model };
+            }
           }
         }
-      }
 
-      // If no submit tool call found, the model may have responded with text only.
-      // This is a failure — we need structured output.
-      throw new Error(
-        `Agent ${agentId} did not call ${outputName} tool. It responded with text instead of structured output.`,
-      );
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      errors.push(msg);
+        // If no submit tool call found and this was the first attempt, retry with nudge
+        if (!isRetry) {
+          onProgress?.(agentId, 'warning', `${modelLabel}: did not call ${outputName}, retrying with nudge`);
+          continue; // go to attempt 1
+        }
+
+        // Second attempt also failed — record error and try next model
+        throw new Error(
+          `[${modelLabel}] Agent ${agentId} did not call ${outputName} after retry.`,
+        );
+      } catch (error) {
+        const raw = error instanceof Error ? error.message : String(error);
+        const msg = raw.startsWith('[') ? raw : `[${modelLabel}] ${raw}`;
+        // Only record the error if this is the final attempt for this model
+        if (attempt > 0 || !raw.includes('did not call')) {
+          errors.push(msg);
+          break; // move to next model
+        }
+        // For "did not call" on first attempt, the continue above handles retry
+      }
     }
   }
 
@@ -177,6 +229,16 @@ import { eventBus } from '../server/routes/ws.ts';
 import { sessionManager } from '../server/session.ts';
 import { TaskBoard } from './task-board.ts';
 import { createCommTools } from './agent-comms.ts';
+import { startSteering, initInbox, createAbortSignal, cleanupAbort, type SteeringSession } from './agent-steering.ts';
+
+// Module-level reference to the currently active AgentDisplay (if any).
+// This allows the API layer to query agent status during execution.
+let currentDisplay: AgentDisplay | null = null;
+
+/** Get the current active AgentDisplay (null if no agents are running). */
+export function getCurrentDisplay(): AgentDisplay | null {
+  return currentDisplay;
+}
 
 /**
  * Creates a progress callback that feeds both the terminal AgentDisplay
@@ -189,7 +251,8 @@ function createDualCallback(display: AgentDisplay): ProgressCallback {
 
     // Map event types to agent-progress WebSocket events
     const persona = loadPersona(agentId);
-    const name = persona.codename;
+    const suffixMatch = agentId.match(/-(\d+)$/);
+    const name = suffixMatch ? `${persona.codename}-${suffixMatch[1]}` : persona.codename;
     if (event === 'start' || event === 'tool') {
       eventBus.publish('agent-progress', { agentId, name, status: 'working', action: detail });
     } else if (event === 'done') {
@@ -225,6 +288,7 @@ export interface WorkflowResult {
 
 export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowResult> {
   const { idea, config, projectRoot, guidance, mode, customAgentIds } = options;
+  setProjectRoot(projectRoot ?? process.cwd());
   const tokenCounter = new TokenCounter();
 
   // Determine which agents to use for planning based on mode
@@ -282,10 +346,58 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
 
   p.log.info(`Received ${contributions.length} contributions with ${contributions.reduce((n, c) => n + c.items.length, 0)} total items.`);
 
-  // --- Ford merges ---
+  // --- Ford merges (with retry on failure) ---
   eventBus.publish('round', { round: 1, phase: 'merging' });
   p.log.step('③ Ford merging contributions...');
-  let plan = await fordMerge(idea, classification, context, contributions, config, tokenCounter);
+  let plan: MergedPlan;
+  while (true) {
+    try {
+      plan = await fordMerge(idea, classification, context, contributions, config, tokenCounter);
+      break;
+    } catch (mergeError) {
+      const errMsg = mergeError instanceof Error ? mergeError.message : String(mergeError);
+      p.log.error(`Merge failed: ${errMsg}`);
+
+      const action = await p.select({
+        message: 'Ford failed to merge the plan. What would you like to do?',
+        options: [
+          { value: 'retry', label: 'Retry merge', hint: 'Try again with the same models' },
+          { value: 'skip', label: 'Skip merge — use raw contributions', hint: 'Auto-generate a plan from contributions' },
+          { value: 'abort', label: 'Abort workflow' },
+        ],
+      });
+
+      if (p.isCancel(action) || action === 'abort') {
+        throw mergeError;
+      }
+
+      if (action === 'skip') {
+        // Build a synthetic plan from raw contributions
+        const allItems = contributions.flatMap((c, ci) =>
+          c.items.map((item, ii) => ({
+            id: `item-${ci}-${ii}`,
+            title: item.title.slice(0, 80),
+            description: item.description.slice(0, 200),
+            priority: 'should' as const,
+            phase: item.phase ?? 1,
+            source: c.agentId,
+            selected: true,
+          }))
+        );
+        plan = {
+          summary: `Auto-generated from ${contributions.length} agent contributions (merge skipped)`,
+          categories: [{ name: 'All Items', items: allItems }],
+          techStack: Object.fromEntries(
+            contributions.flatMap(c => c.techSuggestions?.map(t => [t.tool, t.reason]) ?? [])
+          ),
+          phases: [{ number: 1, title: 'Implementation', scope: 'All items', effort: 'medium' }],
+        };
+        break;
+      }
+      // action === 'retry' → loop again
+      p.log.step('③ Retrying merge...');
+    }
+  }
 
   // --- Phase 3: PICK (user selects items) ---
   const pickResult = await userPickItems(plan);
@@ -479,11 +591,18 @@ async function runPlanningPass1(
   agentIds: readonly string[] = PLANNING_AGENT_IDS,
 ): Promise<PlanContribution[]> {
   const display = new AgentDisplay(agentIds);
+  currentDisplay = display;
   const onProgress = createDualCallback(display);
+  sessionManager.update({ activeAgents: [...agentIds] });
+
+  // Start interactive steering (non-blocking keypresses)
+  initInbox(agentIds);
+  const steering = startSteering(display);
 
   const promises = agentIds.map(async (agentId) => {
     const persona = loadPersona(agentId);
     const models = resolveAgentModels(agentId, persona.model, config);
+    const abortSignal = createAbortSignal(agentId);
 
     const messages = buildAgentMessages({
       agentId,
@@ -504,8 +623,12 @@ async function runPlanningPass1(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
+        maxSteps: 20,
         onProgress,
+        abortSignal,
       });
+
+      cleanupAbort(agentId);
 
       const inputTokens = estimateTokens(messages.map(m =>
         typeof m.content === 'string' ? m.content : ''
@@ -523,6 +646,7 @@ async function runPlanningPass1(
       onProgress(agentId, 'done', `${contribution.items.length} items`);
       return contribution;
     } catch (error) {
+      cleanupAbort(agentId);
       onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
@@ -530,8 +654,11 @@ async function runPlanningPass1(
 
   const results = await Promise.allSettled(promises);
 
-  // Finalize the display — replace live panels with a static summary
+  // Stop steering and finalize display
+  steering.stop();
   display.finalize();
+  currentDisplay = null;
+  sessionManager.update({ activeAgents: [] });
 
   const contributions: PlanContribution[] = [];
 
@@ -564,6 +691,7 @@ async function fordMerge(
 ): Promise<MergedPlan> {
   const persona = loadPersona('executor');
   const models = resolveAgentModels('executor', persona.model, config);
+  sessionManager.update({ activeAgents: ['executor'] });
   const mergeInstructions = buildMergeInstructions(contributions);
 
   const messages = buildAgentMessages({
@@ -584,6 +712,7 @@ async function fordMerge(
     agentId: 'executor',
     temperature: persona.temperature,
     maxOutputTokens: persona.maxTokens,
+    maxSteps: 15,
   });
 
   const inputTokens = estimateTokens(messages.map(m =>
@@ -598,6 +727,7 @@ async function fordMerge(
     agentId: 'executor',
   });
 
+  sessionManager.update({ activeAgents: [] });
   return result.object;
 }
 
@@ -710,11 +840,17 @@ async function runPlanningPass2(
   guidance?: string,
 ): Promise<{ updatedPlan: MergedPlan; contested: ContestedItem[] }> {
   const display = new AgentDisplay(PLANNING_AGENT_IDS);
+  currentDisplay = display;
   const onProgress = createDualCallback(display);
+  sessionManager.update({ activeAgents: [...PLANNING_AGENT_IDS] });
+
+  initInbox(PLANNING_AGENT_IDS);
+  const steering = startSteering(display);
 
   const promises = PLANNING_AGENT_IDS.map(async (agentId) => {
     const persona = loadPersona(agentId);
     const models = resolveAgentModels(agentId, persona.model, config);
+    const abortSignal = createAbortSignal(agentId);
 
     const messages = buildAgentMessages({
       agentId,
@@ -737,7 +873,9 @@ async function runPlanningPass2(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
+        maxSteps: 15,
         onProgress,
+        abortSignal,
       });
 
       const inputTokens = estimateTokens(messages.map(m =>
@@ -755,16 +893,21 @@ async function runPlanningPass2(
       const change = { ...result.object, agentId } as PlanChange;
       const adds = change.additions.length;
       const rems = change.removals.length;
+      cleanupAbort(agentId);
       onProgress(agentId, 'done', `+${adds} -${rems} changes`);
       return change;
     } catch (error) {
+      cleanupAbort(agentId);
       onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
   });
 
   const results = await Promise.allSettled(promises);
+  steering.stop();
   display.finalize();
+  currentDisplay = null;
+  sessionManager.update({ activeAgents: [] });
 
   const changes: PlanChange[] = [];
 
@@ -919,6 +1062,9 @@ async function runCoding(
 
   p.log.info(`Parallel coding: ${parallelAgents} agents, ${board.totalCount} tasks (${board.getAvailableTasks().length} immediately available)`);
 
+  // Register board with session manager for API access
+  sessionManager.setTaskBoard(board);
+
   // Publish board events to the UI
   board.subscribe((event) => {
     eventBus.publish('task-board', event);
@@ -931,8 +1077,17 @@ async function runCoding(
   // Spawn parallel coder agents
   const agentIds = Array.from({ length: parallelAgents }, (_, i) => `coder-${i + 1}`);
   const display = new AgentDisplay(agentIds);
+  currentDisplay = display;
   const onProgress = createDualCallback(display);
-  const maxSteps = codingConfig?.maxStepsPerAgent ?? 25;
+  sessionManager.update({ activeAgents: [...agentIds] });
+  // Steps per iteration — keep moderate so continuation context kicks in between tasks
+  // ~15 steps is enough for: claim(1) + read(3-4) + write(2-3) + complete(1) + buffer
+  const stepsPerIteration = codingConfig?.maxStepsPerAgent ?? 15;
+  // Max total iterations per agent (each iteration ≈ 1 task)
+  const maxIterations = codingConfig?.maxIterations ?? 15;
+
+  initInbox(agentIds);
+  const steering = startSteering(display);
 
   const agentPromises = agentIds.map(async (agentId) => {
     const commTools = createCommTools(agentId, board, {
@@ -948,7 +1103,7 @@ async function runCoding(
     // Build task instructions — agent uses the board to claim tasks
     const taskInstructions = buildParallelCoderInstructions(agentId, plan, techStackStr);
 
-    const messages = buildAgentMessages({
+    const baseMessages = buildAgentMessages({
       agentId: 'coder', // Use 'coder' persona for prompt assembly
       idea,
       phase: 'code',
@@ -960,65 +1115,215 @@ async function runCoding(
 
     // Add the submit tool for final signal
     const submitTool = (await import('ai')).tool({
-      description: 'Call this when you have no more tasks to work on. Reports your final status.',
+      description: 'Call this when there are NO more tasks available on the board. Reports your final status.',
       inputSchema: CoderDoneSchema,
     });
 
-    try {
-      onProgress(agentId, 'start', 'checking task board');
+    // Doom loop detection state (persists across iterations)
+    const readCounts = new Map<string, number>(); // filePath → read count
+    let doomLoopDetected = false;
 
-      const result = await generateText({
-        model: models[0]!,
-        messages,
-        tools: { ...allTools, coderDone: submitTool },
-        stopWhen: stepCountIs(maxSteps),
-        temperature: persona.temperature,
-        maxOutputTokens: persona.maxTokens,
-        toolChoice: 'auto',
-        experimental_onToolCallStart: (event) => {
-          const name = event.toolCall.toolName;
-          const args = event.toolCall.input;
-          if (name === 'coderDone') {
-            onProgress(agentId, 'submit', 'wrapping up');
-          } else if (name === 'claimTask' || name === 'claimNextTask') {
-            onProgress(agentId, 'tool', `claiming task`);
-          } else if (name === 'completeTask') {
-            onProgress(agentId, 'tool', `completing task`);
-          } else if (name === 'getBoard') {
-            onProgress(agentId, 'tool', 'checking board');
-          } else if (name === 'postMessage' || name === 'readMessages') {
-            onProgress(agentId, 'tool', 'communicating');
-          } else {
-            onProgress(agentId, 'tool', formatToolCallDetail(name, args));
+    const toolCallProgressHandler = (event: { toolCall: { toolName: string; input: unknown } }) => {
+      const name = event.toolCall.toolName;
+      const args = event.toolCall.input as Record<string, unknown>;
+
+      // Track file reads for doom loop detection
+      if (name === 'readFile') {
+        const filePath = (args?.path ?? args?.filePath ?? '') as string;
+        if (filePath) {
+          const count = (readCounts.get(filePath) ?? 0) + 1;
+          readCounts.set(filePath, count);
+          if (count >= 4) {
+            doomLoopDetected = true;
+            onProgress(agentId, 'tool', `doom loop: read ${filePath} ${count} times — breaking`);
           }
-        },
-      });
+        }
+      }
 
-      // Count tokens
-      const inputTokens = estimateTokens(messages.map(m =>
-        typeof m.content === 'string' ? m.content : ''
-      ).join(''));
-      const outputTokens = estimateTokens(JSON.stringify(result.steps.map(s => s.toolCalls)));
-      tokenCounter.record({
-        inputTokens,
-        outputTokens,
-        modelId: 'coder',
-        phase: 'code',
-        agentId,
-      });
+      if (name === 'coderDone') {
+        onProgress(agentId, 'submit', 'wrapping up');
+      } else if (name === 'claimTask') {
+        const taskId = args?.taskId as string | undefined;
+        const task = taskId ? board.getTask(taskId) : undefined;
+        onProgress(agentId, 'tool', task ? `claiming: ${task.title}` : 'claiming task');
+      } else if (name === 'claimNextTask') {
+        onProgress(agentId, 'tool', 'claiming next available task');
+      } else if (name === 'completeTask') {
+        const taskId = args?.taskId as string | undefined;
+        const task = taskId ? board.getTask(taskId) : undefined;
+        onProgress(agentId, 'tool', task ? `done: ${task.title}` : 'completing task');
+      } else if (name === 'getBoard') {
+        onProgress(agentId, 'tool', 'checking board');
+      } else if (name === 'postMessage' || name === 'readMessages') {
+        onProgress(agentId, 'tool', 'communicating');
+      } else {
+        onProgress(agentId, 'tool', formatToolCallDetail(name, args));
+      }
+    };
 
-      const agentTasks = board.getTasksByAgent(agentId).filter(t => t.status === 'done');
-      onProgress(agentId, 'done', `${agentTasks.length} tasks completed`);
+    /**
+     * Build a rich continuation message with memory of what was already done.
+     * This prevents the agent from re-exploring the same files every iteration.
+     */
+    function buildContinuationContext(): string {
+      const myDone = board.getTasksByAgent(agentId).filter(t => t.status === 'done');
+      const myClaimed = board.getTasksByAgent(agentId).filter(t => t.status === 'claimed');
+      const remaining = board.getAvailableTasks();
 
-      return agentTasks;
-    } catch (error) {
-      onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
-      return [];
+      const parts: string[] = [];
+      parts.push('## Continuation — Pick up where you left off\n');
+
+      if (myDone.length > 0) {
+        parts.push('### Tasks you already completed:');
+        for (const t of myDone) {
+          const files = t.producedFiles.length > 0 ? ` (files: ${t.producedFiles.join(', ')})` : '';
+          parts.push(`- [done] ${t.title}${files}`);
+        }
+        parts.push('');
+      }
+
+      if (myClaimed.length > 0) {
+        parts.push('### Tasks you currently have claimed (finish these first):');
+        for (const t of myClaimed) {
+          parts.push(`- [claimed] ${t.title}: ${t.description ?? ''}`);
+        }
+        parts.push('');
+      }
+
+      // Files already read — don't re-read them
+      const filesRead = [...readCounts.entries()].filter(([, c]) => c > 0).map(([f]) => f);
+      if (filesRead.length > 0) {
+        parts.push(`### Files you already read (do NOT re-read these):`);
+        parts.push(filesRead.join(', '));
+        parts.push('');
+      }
+
+      if (remaining.length > 0) {
+        parts.push(`### Remaining available tasks (${remaining.length}):`);
+        for (const t of remaining.slice(0, 10)) {
+          parts.push(`- ${t.title} [${t.priority}]`);
+        }
+        if (remaining.length > 10) {
+          parts.push(`- ... and ${remaining.length - 10} more (use getBoard to see all)`);
+        }
+        parts.push('');
+      }
+
+      parts.push('**Action**: Claim the next available task, implement it with COMPLETE code (not placeholders), call `completeTask`, then repeat. If no tasks remain, call `coderDone`.');
+      parts.push('**Do NOT** re-read files you already read. **Do NOT** explore excessively — focus on writing code.');
+
+      return parts.join('\n');
     }
+
+    onProgress(agentId, 'start', 'checking task board');
+    let totalToolCalls = 0;
+    let consecutiveErrors = 0;
+
+    // Iterative loop — agent keeps running until no more tasks or it calls coderDone
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      // Check if there are remaining tasks worth working on
+      const available = board.getAvailableTasks();
+      const myClaimed = board.getTasksByAgent(agentId).filter(t => t.status === 'claimed');
+      if (available.length === 0 && myClaimed.length === 0) {
+        onProgress(agentId, 'tool', 'no more tasks available');
+        break;
+      }
+
+      // Reset doom loop detection per iteration (allow re-reading once per iteration)
+      doomLoopDetected = false;
+      // Keep cumulative read counts but threshold per iteration is 4 total
+
+      // Build messages — on continuation iterations, append rich context
+      const messages = iteration === 0
+        ? baseMessages
+        : [
+            ...baseMessages,
+            { role: 'user' as const, content: buildContinuationContext() },
+          ];
+
+      try {
+        const result = await generateText({
+          model: models[0]!,
+          messages,
+          tools: { ...allTools, coderDone: submitTool },
+          stopWhen: stepCountIs(stepsPerIteration),
+          temperature: persona.temperature,
+          maxOutputTokens: 16000, // Generous per-iteration budget for writing complete files
+          toolChoice: 'auto',
+          experimental_onToolCallStart: toolCallProgressHandler,
+        });
+
+        consecutiveErrors = 0; // Reset on success
+
+        // Count tool calls across this iteration
+        const iterToolCalls = result.steps.reduce((n, s) => n + s.toolCalls.length, 0);
+        totalToolCalls += iterToolCalls;
+
+        // Count tokens
+        const inputTokens = estimateTokens(messages.map(m =>
+          typeof m.content === 'string' ? m.content : ''
+        ).join(''));
+        const outputTokens = estimateTokens(JSON.stringify(result.steps.map(s => s.toolCalls)));
+        tokenCounter.record({
+          inputTokens,
+          outputTokens,
+          modelId: 'coder',
+          phase: 'code',
+          agentId,
+        });
+
+        // Check if the agent called coderDone (signals it's finished)
+        const calledDone = result.steps.some(s =>
+          s.toolCalls.some(tc => tc.toolName === 'coderDone')
+        );
+        if (calledDone) break;
+
+        // If doom loop was detected, fail the current claimed task and move on
+        if (doomLoopDetected) {
+          const stuck = board.getTasksByAgent(agentId).filter(t => t.status === 'claimed');
+          for (const task of stuck) {
+            try { board.fail(task.id, agentId, 'Agent stuck in read loop'); } catch {}
+          }
+          onProgress(agentId, 'tool', 'skipping stuck task, trying next');
+          continue; // try next iteration with a different task
+        }
+
+        // If the agent made zero tool calls, it's stuck — break
+        if (iterToolCalls === 0) break;
+      } catch (iterError) {
+        consecutiveErrors++;
+        const errMsg = iterError instanceof Error ? iterError.message : String(iterError);
+        onProgress(agentId, 'tool', `error (attempt ${consecutiveErrors}/3): ${errMsg.slice(0, 80)}`);
+
+        // Release any claimed task so other agents can pick it up
+        const myCurrent = board.getTasksByAgent(agentId).filter(t => t.status === 'claimed');
+        for (const task of myCurrent) {
+          try { board.fail(task.id, agentId, errMsg.slice(0, 100)); } catch {}
+        }
+
+        // 3 consecutive errors = give up on this agent
+        if (consecutiveErrors >= 3) {
+          onProgress(agentId, 'failed', `${consecutiveErrors} consecutive errors: ${errMsg.slice(0, 80)}`);
+          return [];
+        }
+
+        // Wait briefly before retrying (back off a bit for transient errors)
+        await new Promise(r => setTimeout(r, 1000 * consecutiveErrors));
+        continue;
+      }
+    }
+
+    const agentTasks = board.getTasksByAgent(agentId).filter(t => t.status === 'done');
+    onProgress(agentId, 'done', `${agentTasks.length} tasks completed (${totalToolCalls} tool calls)`);
+
+    return agentTasks;
   });
 
   const results = await Promise.allSettled(agentPromises);
+  steering.stop();
   display.finalize();
+  currentDisplay = null;
+  sessionManager.update({ activeAgents: [] });
 
   // Collect all completed tasks into CodingOutput format
   const outputs: CodingOutput[] = [];
@@ -1054,6 +1359,9 @@ async function runCoding(
   if (dynamicTasks.length > 0) {
     p.log.info(`${dynamicTasks.length} task(s) added dynamically by agents`);
   }
+
+  // Clear board from session manager (coding phase done)
+  sessionManager.setTaskBoard(null);
 
   return outputs;
 }
@@ -1091,9 +1399,14 @@ function buildParallelCoderInstructions(
     '### Rules',
     '- ALWAYS claim a task before implementing it',
     '- ALWAYS complete or fail a task — never leave it in "claimed" limbo',
-    '- Write COMPLETE files with all imports, types, and implementations',
+    '- Write COMPLETE files — every file must have all imports, types, and full implementation',
+    '- NEVER write empty or placeholder files. A "1 line" file is NOT implementation.',
+    '- Read existing files before editing them. Use readFile first, then editFile or writeFile.',
+    '- Each task should produce REAL, working code that integrates with the existing codebase.',
+    '- Focus on implementation, not exploration. Limit codebase reading to what you need for the current task.',
     '- Post a message before writing to a file another agent might also touch',
     '- Do NOT implement tasks you have not claimed',
+    '- After completing a task, immediately claim the next available task — keep working until the board is empty.',
     '',
     '## Tech Stack',
     techStackStr,
@@ -1157,6 +1470,7 @@ async function runSerialCoding(
 
   const s = p.spinner();
   s.start(`Implementing ${selectedItems.length} items...`);
+  sessionManager.update({ activeAgents: ['coder'] });
 
   try {
     const messages = buildAgentMessages({
@@ -1235,6 +1549,7 @@ async function runSerialCoding(
     p.log.error(`Carmack error: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  sessionManager.update({ activeAgents: [] });
   return outputs;
 }
 
@@ -1251,11 +1566,17 @@ async function runReview(
   tokenCounter: TokenCounter,
 ): Promise<CodeReview[]> {
   const display = new AgentDisplay(reviewerIds);
+  currentDisplay = display;
   const onProgress = createDualCallback(display);
+  sessionManager.update({ activeAgents: [...reviewerIds] });
+
+  initInbox(reviewerIds);
+  const steering = startSteering(display);
 
   const promises = reviewerIds.map(async (agentId) => {
     const persona = loadPersona(agentId);
     const models = resolveAgentModels(agentId, persona.model, config);
+    const abortSignal = createAbortSignal(agentId);
 
     const messages = buildAgentMessages({
       agentId,
@@ -1276,8 +1597,12 @@ async function runReview(
         agentId,
         temperature: persona.temperature,
         maxOutputTokens: persona.maxTokens,
+        maxSteps: 15,
         onProgress,
+        abortSignal,
       });
+
+      cleanupAbort(agentId);
 
       const inputTokens = estimateTokens(messages.map(m =>
         typeof m.content === 'string' ? m.content : ''
@@ -1294,6 +1619,7 @@ async function runReview(
       onProgress(agentId, 'done', `score: ${result.object.score}/10, ${result.object.issues.length} issues`);
       return result.object;
     } catch (error) {
+      cleanupAbort(agentId);
       onProgress(agentId, 'failed', error instanceof Error ? error.message.slice(0, 60) : 'unknown error');
       throw error;
     }
@@ -1301,8 +1627,11 @@ async function runReview(
 
   const results = await Promise.allSettled(promises);
 
-  // Finalize the display
+  // Stop steering and finalize display
+  steering.stop();
   display.finalize();
+  currentDisplay = null;
+  sessionManager.update({ activeAgents: [] });
 
   const reviews: CodeReview[] = [];
 
@@ -1331,6 +1660,7 @@ async function runFix(
 ): Promise<CodingOutput[]> {
   const persona = loadPersona('coder');
   const models = resolveAgentModels('coder', persona.model, config);
+  sessionManager.update({ activeAgents: ['coder'] });
 
   const messages = buildAgentMessages({
     agentId: 'coder',
@@ -1396,6 +1726,7 @@ async function runFix(
     }
   }
 
+  sessionManager.update({ activeAgents: [] });
   return [result.object];
 }
 

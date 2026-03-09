@@ -5,6 +5,7 @@ import { getStore } from '../store.ts';
 import { AGENT_DEFS } from '../../council/agent-registry.ts';
 import { loadConfig } from '../../config/loader.ts';
 import { eventBus } from './ws.ts';
+import { getCurrentDisplay } from '../../core/workflow.ts';
 
 export function createApiRoutes(sessionManager: SessionManager): Hono {
   const api = new Hono();
@@ -73,6 +74,36 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
     return c.json({ ok: true });
   });
 
+  // Per-agent steering
+  api.post('/api/steer/:agentId', async (c) => {
+    const agentId = c.req.param('agentId');
+    const body = await c.req.json<{ guidance: string }>();
+    if (!body.guidance) {
+      return c.json({ error: 'guidance is required' }, 400);
+    }
+    sessionManager.addGuidance(body.guidance, agentId);
+    return c.json({ ok: true, agentId });
+  });
+
+  // Live agent status — returns what AgentDisplay knows
+  api.get('/api/agents/status', (c) => {
+    const display = getCurrentDisplay();
+    if (!display) {
+      return c.json({ active: false, agents: [] });
+    }
+    return c.json({ active: true, agents: display.getStatus() });
+  });
+
+  // Agent tool call history
+  api.get('/api/agents/:agentId/history', (c) => {
+    const agentId = c.req.param('agentId');
+    const display = getCurrentDisplay();
+    if (!display) {
+      return c.json({ agentId, history: [] });
+    }
+    return c.json({ agentId, history: display.getAgentHistory(agentId) });
+  });
+
   // Expose resolved config (read-only) and allow updates to mutable fields
   api.get('/api/config', async (c) => {
     try {
@@ -109,6 +140,16 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
 
   api.get('/api/health', (c) => {
     return c.json({ status: 'ok' });
+  });
+
+  // --- Task Board (parallel coding) ---
+
+  api.get('/api/task-board', (c) => {
+    const snapshot = sessionManager.getTaskBoardSnapshot();
+    if (!snapshot) {
+      return c.json({ active: false, board: null });
+    }
+    return c.json({ active: true, board: snapshot });
   });
 
   // --- Council agents ---
@@ -234,8 +275,7 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
         return c.json({ error: 'Not in a git repository or git is not available.' }, 400);
       }
 
-      const lines = output.trim().split('
-').filter(Boolean);
+      const lines = output.trim().split('\n').filter(Boolean);
 
       // Format commits with icons based on conventional commit type
       const commitTypePattern = /^[a-f0-9]+ (?:\[[\w-]+\] )?(\w+):/;
@@ -339,6 +379,42 @@ export function createApiRoutes(sessionManager: SessionManager): Hono {
     };
     sessionManager.addNotification(notification);
     return c.json({ ok: true });
+  });
+
+  /**
+   * Mock task board for UI testing — seeds a TaskBoard with sample tasks.
+   */
+  api.post('/api/test/mock-task-board', async (c) => {
+    const { TaskBoard } = await import('../../core/task-board.ts');
+    const board = new TaskBoard();
+
+    // Create sample tasks simulating parallel coding
+    board.addTask('system', { id: 'ws-events', title: 'Normalize WebSocket events', description: 'Ensure all runtime events are emitted with consistent envelope', category: 'API & Server', phase: 1, priority: 'must' });
+    board.addTask('system', { id: 'http-logs', title: 'Expose persisted logs via HTTP', description: 'Add /api/logs/:sessionId endpoint for historical logs', category: 'API & Server', phase: 1, priority: 'should' });
+    board.addTask('system', { id: 'log-buffer', title: 'LogBuffer API + DB seeding', description: 'Provide LogBuffer API and seed from DB on create/restore', category: 'API & Server', phase: 1, priority: 'should' });
+    board.addTask('system', { id: 'git-tab', title: 'Git History tab endpoint', description: 'Add /api/git-history for recent commits', category: 'API & Server', phase: 1, priority: 'could' });
+    board.addTask('system', { id: 'seed-ui', title: 'Seed desktop UI from APIs', description: 'Fetch session, plan, scores before opening WS', category: 'Desktop UI', phase: 2, priority: 'should', dependsOn: ['ws-events'] });
+    board.addTask('system', { id: 'pause-ship', title: 'Pause & Ship Now buttons', description: 'Add session control buttons to desktop panel', category: 'Desktop UI', phase: 2, priority: 'could' });
+    board.addTask('system', { id: 'unit-tests', title: 'API unit tests + E2E smoke', description: 'Test logs, WS events, and parity with CLI', category: 'Testing', phase: 3, priority: 'should', dependsOn: ['ws-events', 'http-logs'] });
+
+    // Simulate some progress
+    board.claim('ws-events', 'coder-1');
+    board.claim('http-logs', 'coder-2');
+    board.claim('log-buffer', 'coder-3');
+    board.complete('ws-events', 'coder-1', { files: ['src/server/routes/ws.ts', 'src/server/index.ts'], commitMessage: 'feat: normalize WebSocket event envelope', summary: 'All events now use consistent {type, data} envelope' });
+    board.postMessage('coder-1', 'Finished WS events normalization, seed-ui is now unblocked');
+    board.postMessage('coder-2', 'Working on HTTP logs endpoint, reading store.ts');
+    board.postMessage('coder-3', 'LogBuffer seeding in progress, touching session.ts');
+
+    sessionManager.setTaskBoard(board);
+    // Also publish initial state to WS
+    eventBus.publish('task-board', { type: 'snapshot', ...board.snapshot() });
+    return c.json({ ok: true, board: board.snapshot() });
+  });
+
+  api.post('/api/test/clear-task-board', (_c) => {
+    sessionManager.setTaskBoard(null);
+    return _c.json({ ok: true });
   });
 
   return api;

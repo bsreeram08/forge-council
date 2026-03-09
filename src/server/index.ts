@@ -69,7 +69,7 @@ export function startServer(app: Hono, port: number): { port: number; server: Re
   });
 
   // Pipe eventBus events to WebSocket subscribers
-  for (const topic of ['round', 'plan', 'score', 'freshEyes', 'agent-progress', 'pending-action', 'notification'] as const) {
+  for (const topic of ['round', 'plan', 'score', 'freshEyes', 'agent-progress', 'pending-action', 'notification', 'task-board'] as const) {
     eventBus.subscribe(topic, (data) => {
       const payload = { type: topic, data };
       server.publish('events', JSON.stringify(payload));
@@ -115,6 +115,21 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .agents-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .agent-chip { font-size: 12px; padding: 3px 8px; border-radius: 4px; background: var(--bg); border: 1px solid var(--border); }
     .agent-chip.active { border-color: var(--accent); color: var(--accent); }
+    .agent-live-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; transition: border-color 0.3s; }
+    .agent-live-card.working { border-left: 3px solid var(--accent); }
+    .agent-live-card.done { border-left: 3px solid var(--green); }
+    .agent-live-card.failed { border-left: 3px solid var(--red); }
+    .agent-live-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .agent-live-header .a-name { font-size: 13px; font-weight: 600; }
+    .agent-live-header .a-status { margin-left: auto; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+    .agent-live-header .a-status.working { background: rgba(88,166,255,0.15); color: var(--accent); }
+    .agent-live-header .a-status.done { background: rgba(63,185,80,0.15); color: var(--green); }
+    .agent-live-header .a-status.failed { background: rgba(248,81,73,0.15); color: var(--red); }
+    .agent-live-action { font-family: var(--font); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-steer-row { display: flex; gap: 6px; margin-top: 6px; }
+    .agent-steer-row input { flex: 1; padding: 4px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 11px; outline: none; }
+    .agent-steer-row input:focus { border-color: var(--accent); }
+    .agent-steer-row button { padding: 4px 10px; background: var(--accent); color: #fff; border: none; border-radius: 4px; font-size: 11px; cursor: pointer; }
     .score-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; font-family: var(--font); font-size: 13px; }
     .score-row .round-label { width: 70px; color: var(--muted); }
     .bar-bg { flex: 1; height: 22px; background: var(--bg); border-radius: 4px; position: relative; overflow: hidden; }
@@ -210,6 +225,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="agents-bar" id="agents-bar"></div>
       </div>
 
+      <div id="agents-live-panel" class="panel hidden">
+        <h2>Live Agents</h2>
+        <div id="agents-live-area"></div>
+      </div>
+
       <div class="panel">
         <h2>Guidance</h2>
         <div id="guidance-list"></div>
@@ -289,8 +309,59 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     const guidanceList = document.getElementById('guidance-list');
     const guidanceInput = document.getElementById('guidance-input');
     const guidanceBtn = document.getElementById('guidance-btn');
+    const agentsLivePanel = document.getElementById('agents-live-panel');
+    const agentsLiveArea = document.getElementById('agents-live-area');
     let lastLogId = 0;
     let logStarted = false;
+
+    // Track live agent state from WebSocket events
+    const liveAgents = new Map(); // agentId -> { name, status, action }
+
+    function handleAgentProgress(data) {
+      const { agentId, name, status, action, error } = data;
+      if (!agentId) return;
+
+      liveAgents.set(agentId, { name: name || agentId, status, action: action || error || '' });
+
+      // Show the panel
+      agentsLivePanel.classList.remove('hidden');
+
+      // Re-render all agent cards
+      agentsLiveArea.innerHTML = '';
+      for (const [id, agent] of liveAgents) {
+        const card = document.createElement('div');
+        card.className = 'agent-live-card ' + agent.status;
+        card.innerHTML = '<div class="agent-live-header">' +
+          '<span class="a-name">' + esc(agent.name) + '</span>' +
+          '<span class="a-status ' + agent.status + '">' + esc(agent.status) + '</span>' +
+          '</div>' +
+          '<div class="agent-live-action">' + esc(agent.action) + '</div>' +
+          '<div class="agent-steer-row">' +
+          '<input type="text" placeholder="Steer ' + esc(agent.name) + '..." id="steer-' + esc(id) + '" />' +
+          '<button onclick="steerAgent(\'' + esc(id) + '\')">Send</button>' +
+          '</div>';
+        agentsLiveArea.appendChild(card);
+      }
+
+      // If all agents are done/failed, keep showing but could auto-hide after delay
+      const allDone = [...liveAgents.values()].every(a => a.status === 'done' || a.status === 'failed');
+      if (allDone) {
+        setTimeout(() => { liveAgents.clear(); agentsLivePanel.classList.add('hidden'); }, 5000);
+      }
+    }
+
+    window.steerAgent = async function(agentId) {
+      const input = document.getElementById('steer-' + agentId);
+      if (!input || !input.value.trim()) return;
+      try {
+        await fetch('/api/steer/' + agentId, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guidance: input.value.trim() }),
+        });
+        input.value = '';
+      } catch {}
+    };
 
     // Tabs
     document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -655,7 +726,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'log') appendLog(msg.data);
-          if (msg.type === 'score' || msg.type === 'plan' || msg.type === 'round' || msg.type === 'pending-action') poll();
+          if (msg.type === 'agent-progress' && msg.data) handleAgentProgress(msg.data);
+          if (msg.type === 'score' || msg.type === 'plan' || msg.type === 'round' || msg.type === 'pending-action' || msg.type === 'task-board') poll();
           if (msg.type === 'notification' && msg.data) showNotificationBanner(msg.data);
         } catch {}
       };

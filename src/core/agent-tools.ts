@@ -9,19 +9,41 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import * as path from 'path';
 import { AGENT_TOOL_ACCESS, type ToolDefinition } from '../mastra/tools/tool-registry.ts';
+import { fuzzyReplace } from './fuzzy-match.ts';
+import { drainGuidance, hasGuidance } from './agent-steering.ts';
 
 // ---------------------------------------------------------------------------
 // Path security
 // ---------------------------------------------------------------------------
 
-const PROJECT_ROOT = process.cwd();
+let projectRoot = process.cwd();
+
+/** Set the project root for all tool path resolution. Call once at workflow start. */
+export function setProjectRoot(root: string): void {
+  projectRoot = path.resolve(root);
+}
+
+/** Strip numeric suffix from agent IDs (e.g. 'coder-1' → 'coder') for permission lookup. */
+export function resolveBaseAgentId(agentId: string): string {
+  return agentId.replace(/-\d+$/, '');
+}
 
 function safePath(inputPath: string): string {
-  const resolved = path.resolve(PROJECT_ROOT, path.normalize(inputPath));
-  if (!resolved.startsWith(PROJECT_ROOT)) {
+  const resolved = path.resolve(projectRoot, path.normalize(inputPath));
+  if (!resolved.startsWith(projectRoot)) {
     throw new Error(`Path traversal: "${inputPath}" escapes project root`);
   }
   return resolved;
+}
+
+// ---------------------------------------------------------------------------
+// Read-before-write tracking
+// ---------------------------------------------------------------------------
+
+const filesRead = new Set<string>();
+
+export function resetToolTracking(): void {
+  filesRead.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -37,6 +59,7 @@ const readFileTool = tool({
   }),
   execute: async ({ path: filePath, offset, limit }) => {
     const full = safePath(filePath);
+    filesRead.add(full);
     const content = await Bun.file(full).text();
     if (offset > 0 || limit > 0) {
       const lines = content.split('\n');
@@ -124,7 +147,7 @@ const gitLogTool = tool({
   execute: async ({ limit, path: filePath }) => {
     const args = ['git', 'log', `--max-count=${limit}`, '--oneline', '--no-decorate'];
     if (filePath) args.push('--', filePath);
-    const proc = Bun.spawn(args, { cwd: PROJECT_ROOT, stdout: 'pipe', stderr: 'pipe' });
+    const proc = Bun.spawn(args, { cwd: projectRoot, stdout: 'pipe', stderr: 'pipe' });
     const output = await new Response(proc.stdout).text();
     return { commits: output.trim().split('\n').filter(Boolean) };
   },
@@ -140,14 +163,14 @@ const gitDiffTool = tool({
     const args = ['git', 'diff'];
     if (staged) args.push('--staged');
     if (filePath) args.push('--', filePath);
-    const proc = Bun.spawn(args, { cwd: PROJECT_ROOT, stdout: 'pipe', stderr: 'pipe' });
+    const proc = Bun.spawn(args, { cwd: projectRoot, stdout: 'pipe', stderr: 'pipe' });
     const output = await new Response(proc.stdout).text();
     return { diff: output, linesChanged: output.split('\n').length };
   },
 });
 
 const writeFileTool = tool({
-  description: 'Write content to a file. Creates parent directories if needed.',
+  description: 'Write content to a file. Creates parent directories if needed. Use for NEW files only — prefer editFile for modifying existing files.',
   inputSchema: z.object({
     path: z.string().describe('File path relative to project root'),
     content: z.string().describe('Full file content to write'),
@@ -156,32 +179,64 @@ const writeFileTool = tool({
     const full = safePath(filePath);
     const dir = path.dirname(full);
     await Bun.spawn(['mkdir', '-p', dir], { stdout: 'pipe' }).exited;
+
+    // Soft-warn if overwriting an unread file
+    let warning: string | undefined;
+    try {
+      const exists = await Bun.file(full).exists();
+      if (exists && !filesRead.has(full)) {
+        warning = 'File existed but was not read first. Prefer readFile then editFile for existing files.';
+      }
+    } catch { /* ignore */ }
+
     await Bun.write(full, content);
-    return { path: filePath, bytesWritten: content.length, success: true };
+    const result: Record<string, unknown> = { path: filePath, bytesWritten: content.length, success: true };
+    if (warning) result.warning = warning;
+    return result;
   },
 });
 
 const editFileTool = tool({
-  description: 'Apply search-and-replace edits to a file. Reads the file, replaces matching text, writes it back.',
+  description: [
+    'Apply search-and-replace edits to a file. Rules:',
+    '- You MUST call readFile on this file first.',
+    '- The "search" field must be an EXACT copy of text currently in the file.',
+    '- Include 2-3 lines of surrounding context to uniquely identify the edit location.',
+    '- Put ALL edits for the same file in one editFile call (multiple entries in the edits array).',
+    '- If an edit fails, re-read the file — it may have changed from a previous edit.',
+  ].join(' '),
   inputSchema: z.object({
     path: z.string().describe('File path relative to project root'),
     edits: z.array(z.object({
-      search: z.string().describe('Exact text to find'),
+      search: z.string().describe('Exact text to find in the file'),
       replace: z.string().describe('Text to replace with'),
     })),
   }),
   execute: async ({ path: filePath, edits }) => {
     const full = safePath(filePath);
+
+    // Hard-block if file not read first
+    if (!filesRead.has(full)) {
+      return { path: filePath, editsApplied: 0, success: false, error: 'File not read yet. Use readFile first.' };
+    }
+
     let content = await Bun.file(full).text();
     let applied = 0;
+    const results: Array<Record<string, unknown>> = [];
+
     for (const edit of edits) {
-      if (content.includes(edit.search)) {
-        content = content.replace(edit.search, edit.replace);
+      const match = fuzzyReplace(content, edit.search, edit.replace);
+      if (!match) {
+        results.push({ search: edit.search.slice(0, 80), status: 'not-found' });
+      } else {
+        content = match.newContent;
+        results.push({ status: 'applied', strategy: match.result.strategy, confidence: match.result.confidence });
         applied++;
       }
     }
+
     await Bun.write(full, content);
-    return { path: filePath, editsApplied: applied, success: applied > 0 };
+    return { path: filePath, editsApplied: applied, success: applied > 0, results };
   },
 });
 
@@ -194,7 +249,7 @@ const runTestsTool = tool({
     const args = ['bun', 'test'];
     if (pattern) args.push(pattern);
     const proc = Bun.spawn(args, {
-      cwd: PROJECT_ROOT,
+      cwd: projectRoot,
       stdout: 'pipe',
       stderr: 'pipe',
       env: { ...process.env, FORCE_COLOR: '0' },
@@ -213,7 +268,7 @@ const typeCheckTool = tool({
   inputSchema: z.object({}),
   execute: async () => {
     const proc = Bun.spawn(['bun', 'run', 'tsc', '--noEmit'], {
-      cwd: PROJECT_ROOT,
+      cwd: projectRoot,
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -234,14 +289,37 @@ const gitCommitTool = tool({
   }),
   execute: async ({ message, files }) => {
     try {
-      await Bun.spawn(['git', 'add', ...files], { cwd: PROJECT_ROOT, stdout: 'pipe', stderr: 'pipe' }).exited;
-      await Bun.spawn(['git', 'commit', '-m', message], { cwd: PROJECT_ROOT, stdout: 'pipe', stderr: 'pipe' }).exited;
+      await Bun.spawn(['git', 'add', ...files], { cwd: projectRoot, stdout: 'pipe', stderr: 'pipe' }).exited;
+      await Bun.spawn(['git', 'commit', '-m', message], { cwd: projectRoot, stdout: 'pipe', stderr: 'pipe' }).exited;
       return { success: true, message };
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) };
     }
   },
 });
+
+// ---------------------------------------------------------------------------
+// Guidance tool — agents check for user steering mid-execution
+// ---------------------------------------------------------------------------
+
+/** Creates a checkGuidance tool bound to a specific agent ID. */
+function createCheckGuidanceTool(agentId: string) {
+  return tool({
+    description: [
+      'Check if the user has sent you guidance or steering instructions.',
+      'Call this periodically (every 3-5 tool calls) to see if the user wants you to adjust your approach.',
+      'If guidance is returned, incorporate it into your next actions.',
+    ].join(' '),
+    inputSchema: z.object({}),
+    execute: async () => {
+      const messages = drainGuidance(agentId);
+      if (messages.length === 0) {
+        return { hasGuidance: false, messages: [] };
+      }
+      return { hasGuidance: true, messages };
+    },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Tool sets by permission level
@@ -268,17 +346,20 @@ export const READ_WRITE_TOOLS = {
 
 /**
  * Get the AI SDK tools for a given agent based on their permission level.
+ * Includes the checkGuidance tool for all agents (enables mid-execution steering).
  */
 export function getAgentTools(agentId: string): Record<string, any> {
-  const access = AGENT_TOOL_ACCESS[agentId];
-  if (!access) return READ_ONLY_TOOLS;
+  const access = AGENT_TOOL_ACCESS[resolveBaseAgentId(agentId)];
+  const guidanceTool = { checkGuidance: createCheckGuidanceTool(agentId) };
+
+  if (!access) return { ...READ_ONLY_TOOLS, ...guidanceTool };
 
   switch (access.permission) {
     case 'ADMIN':
     case 'READ_WRITE':
-      return READ_WRITE_TOOLS;
+      return { ...READ_WRITE_TOOLS, ...guidanceTool };
     case 'READ_ONLY':
     default:
-      return READ_ONLY_TOOLS;
+      return { ...READ_ONLY_TOOLS, ...guidanceTool };
   }
 }

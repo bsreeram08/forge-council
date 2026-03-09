@@ -152,8 +152,10 @@ export type EditReviewConfig = z.infer<typeof EditReviewConfigSchema>;
 export const CodingConfigSchema = z.object({
   /** Number of parallel coder agents (1 = serial, like before) */
   parallelAgents: z.number().min(1).max(8).default(3),
-  /** Max tool call steps per agent */
-  maxStepsPerAgent: z.number().default(25),
+  /** Max tool call steps per agent per iteration (~1 task per iteration) */
+  maxStepsPerAgent: z.number().default(15),
+  /** Max iterations per agent (each iteration = one generateText call, roughly one task) */
+  maxIterations: z.number().min(1).max(30).default(15),
 });
 
 export type CodingConfig = z.infer<typeof CodingConfigSchema>;

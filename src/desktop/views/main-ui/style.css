@@ -1282,3 +1282,370 @@ main {
   padding: 16px 0;
   text-align: center;
 }
+
+/* =========================================================================
+   Task Board (parallel coding) — Agent-centric layout
+   ========================================================================= */
+
+.task-board-summary {
+  margin-bottom: 16px;
+}
+
+.board-header-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 4px;
+}
+
+.board-progress-ring {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+}
+
+.board-progress-ring svg {
+  display: block;
+}
+
+.ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.board-header-stats {
+  flex: 1;
+}
+
+.board-header-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.board-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.board-stat {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.board-stat-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.board-stat-dot.pending {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+.board-stat-dot.claimed {
+  background: var(--accent);
+  animation: pulse 1.5s infinite;
+}
+
+.board-stat-dot.done {
+  background: var(--green);
+}
+
+.board-stat-dot.failed {
+  background: var(--red);
+}
+
+/* Agent Lanes */
+
+.task-board-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-lane {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  animation: laneIn 0.3s ease-out;
+}
+
+@keyframes laneIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.agent-lane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.agent-lane-name {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.agent-lane-stats {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.lane-stat {
+  font-family: var(--font);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.lane-stat.active {
+  background: rgba(88, 166, 255, 0.12);
+  color: var(--accent);
+}
+
+.lane-stat.done {
+  background: rgba(63, 185, 80, 0.12);
+  color: var(--green);
+}
+
+.lane-stat.failed {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--red);
+}
+
+.lane-stat.files {
+  background: rgba(139, 148, 158, 0.1);
+  color: var(--text-muted);
+}
+
+.agent-lane-action {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 0 6px 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: actionFade 0.3s ease;
+}
+
+@keyframes actionFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.agent-lane-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Task rows */
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  transition: background 0.3s, opacity 0.3s;
+}
+
+.task-row.task-claimed {
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.task-row.task-done {
+  opacity: 0.55;
+}
+
+.task-row.task-done .task-title {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.task-row.task-failed {
+  opacity: 0.7;
+}
+
+/* Claim animation — flash + slide in */
+.task-row.task-claim-anim {
+  animation: taskClaim 0.6s ease-out;
+}
+
+@keyframes taskClaim {
+  0% { background: rgba(88, 166, 255, 0.25); transform: translateX(-4px); }
+  50% { background: rgba(88, 166, 255, 0.12); }
+  100% { background: rgba(88, 166, 255, 0.06); transform: translateX(0); }
+}
+
+/* Done animation — checkmark flash */
+.task-row.task-done-anim {
+  animation: taskDone 0.5s ease-out;
+}
+
+@keyframes taskDone {
+  0% { background: rgba(63, 185, 80, 0.2); }
+  100% { background: transparent; }
+}
+
+.task-status-icon {
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.task-status-icon.done {
+  color: var(--green);
+}
+
+.task-status-icon.claimed {
+  color: var(--accent);
+  animation: pulse 1.5s infinite;
+}
+
+.task-status-icon.failed {
+  color: var(--red);
+}
+
+.task-status-icon.pending {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.task-priority {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.priority-must {
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.1);
+}
+
+.priority-should {
+  color: var(--yellow);
+  background: rgba(210, 153, 34, 0.1);
+}
+
+.priority-could {
+  color: var(--text-muted);
+  background: rgba(139, 148, 158, 0.1);
+}
+
+.task-title {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.task-phase {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.task-files {
+  font-family: var(--font);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(63, 185, 80, 0.1);
+  color: var(--green);
+  flex-shrink: 0;
+}
+
+/* Pending task pool */
+
+.task-pool {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.task-pool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.task-pool-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.task-pool-count {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.task-pool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Board messages */
+
+.task-board-messages {
+  margin-top: 12px;
+}
+
+.board-messages-header {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.board-message {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 3px 0;
+  line-height: 1.5;
+}
+
+.board-msg-from {
+  font-family: var(--font);
+  font-weight: 600;
+  font-size: 11px;
+}

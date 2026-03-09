@@ -252,6 +252,7 @@ export const SessionSchema = z.object({
   ),
   activeAgents: z.array(z.string()),
   guidance: z.array(z.string()).optional(),
+  agentGuidance: z.record(z.string(), z.array(z.string())).optional(),
   notifications: z.array(NotificationSchema).optional(),
 });
 
