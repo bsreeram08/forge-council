@@ -95,7 +95,7 @@ function createModelInstance(
 
   const apiKey = resolveApiKey(providerConfig.apiKey);
 
-  // OpenRouter needs the compatible adapter with custom headers
+  // OpenRouter needs custom headers
   if (providerName === 'openrouter') {
     const compatible = createOpenAICompatible({
       name: 'openrouter',
@@ -105,6 +105,19 @@ function createModelInstance(
         'HTTP-Referer': 'https://forgecouncil.dev',
         'X-Title': 'ForgeCouncil',
       },
+    });
+    return compatible.chatModel(modelId);
+  }
+
+  // Providers that use OpenAI-compatible API directly
+  const OPENAI_COMPATIBLE_PROVIDERS = new Set([
+    'google', 'groq', 'xai', 'deepseek', 'mistral', 'together', 'antigravity',
+  ]);
+  if (OPENAI_COMPATIBLE_PROVIDERS.has(providerName)) {
+    const compatible = createOpenAICompatible({
+      name: providerName,
+      baseURL: providerConfig.baseUrl,
+      apiKey,
     });
     return compatible.chatModel(modelId);
   }

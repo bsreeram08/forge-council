@@ -215,12 +215,12 @@ export const DEFAULT_PIPELINE: PipelineConfig = {
     },
     {
       id: 'code',
-      name: 'Code',
+      name: 'Code (Parallel)',
       handler: 'code',
       agents: [{ agentId: 'coder', required: true }],
-      parallel: false,
+      parallel: true,
       condition: { type: 'always' },
-      dynamicAgents: false,
+      dynamicAgents: true,
     },
     {
       id: 'review',

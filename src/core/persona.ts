@@ -461,7 +461,8 @@ export const CORE_AGENT_IDS = ['executor', 'coder'] as const;
 // ---------------------------------------------------------------------------
 
 export function loadPersona(agentId: string): PersonaConfig {
-  const persona = PERSONAS[agentId];
+  // Try exact match first, then strip numeric suffix (e.g. 'coder-1' → 'coder')
+  const persona = PERSONAS[agentId] ?? PERSONAS[agentId.replace(/-\d+$/, '')];
   if (!persona) {
     throw new Error(`Unknown agent: ${agentId}. Available: ${Object.keys(PERSONAS).join(', ')}`);
   }

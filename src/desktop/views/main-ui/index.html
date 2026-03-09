@@ -25,7 +25,9 @@
       <button class="nav-tab" data-tab="tab-plan">Plan</button>
       <button class="nav-tab" data-tab="tab-reviews">Reviews</button>
       <button class="nav-tab" data-tab="tab-council">Council</button>
-      <button class="nav-tab" data-tab="tab-history">History</button>
+      <button class="nav-tab" data-tab="tab-config">Config</button>
+      <button class="nav-tab" data-tab="tab-git">Git</button>
+      <button class="nav-tab" data-tab="tab-history">Sessions</button>
     </nav>
 
     <main id="main">
@@ -50,6 +52,34 @@
             <input type="text" id="guidance-input" placeholder="Inject guidance for the current session..." />
             <button id="guidance-btn" class="btn-primary">Send</button>
           </div>
+        </section>
+
+        <!-- Session Actions (pause, ship) -->
+        <section id="actions-panel" class="panel">
+          <h2>Actions</h2>
+          <div class="session-actions">
+            <button id="action-pause" class="btn-secondary">Pause</button>
+            <button id="action-ship" class="btn-primary">Ship Now</button>
+          </div>
+        </section>
+
+        <!-- Pending Action Banner -->
+        <section id="pending-action-panel" class="panel hidden pending-action-banner">
+          <div id="pending-action-content"></div>
+        </section>
+
+        <!-- Notifications -->
+        <section id="notifications-panel" class="panel hidden">
+          <h2>Notifications</h2>
+          <div id="notifications-list" class="notifications-list"></div>
+        </section>
+
+        <!-- Task Board (parallel coding) -->
+        <section id="task-board-panel" class="panel hidden">
+          <h2>Task Board</h2>
+          <div id="task-board-summary" class="task-board-summary"></div>
+          <div id="task-board-tasks" class="task-board-tasks"></div>
+          <div id="task-board-messages" class="task-board-messages"></div>
         </section>
 
         <!-- Agent Cards -->
@@ -78,6 +108,22 @@
           <div id="plan-round-label" class="plan-round-label"></div>
           <div id="plan-viewer" class="plan-viewer">
             <div class="empty-state">No plan yet — start a session to see the plan.</div>
+          </div>
+        </section>
+
+        <!-- Plan Items Selection (shown when pick-items pending action) -->
+        <section id="plan-pick-panel" class="panel hidden">
+          <h2>Select Items to Build</h2>
+          <p class="panel-desc">Toggle items on/off, then approve or refine the plan.</p>
+          <div id="plan-items-list" class="plan-items-list"></div>
+          <div class="plan-actions">
+            <button id="plan-select-all" class="btn-secondary">Select All</button>
+            <button id="plan-deselect-all" class="btn-secondary">Deselect All</button>
+            <span class="plan-count" id="plan-selected-count">0 selected</span>
+            <div class="plan-actions-right">
+              <button id="plan-refine-btn" class="btn-secondary">Refine (Pass 2)</button>
+              <button id="plan-approve-btn" class="btn-primary">Approve &amp; Code</button>
+            </div>
           </div>
         </section>
       </div>

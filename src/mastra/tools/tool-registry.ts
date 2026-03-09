@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+/** Strip numeric suffix from agent IDs (e.g. 'coder-1' → 'coder') for permission lookup. */
+function resolveBaseAgentId(agentId: string): string {
+  return agentId.replace(/-\d+$/, '');
+}
+
 // ============================================================================
 // Permission System
 // ============================================================================
@@ -1118,7 +1123,7 @@ const PERMISSION_HIERARCHY: Record<PermissionLevel, number> = {
  * Check if an agent has permission to use a specific tool
  */
 export function canUseTool(agentId: string, toolId: string): boolean {
-  const access = AGENT_TOOL_ACCESS[agentId];
+  const access = AGENT_TOOL_ACCESS[resolveBaseAgentId(agentId)];
   if (!access) return false;
 
   // Wildcard access (executor)
@@ -1141,7 +1146,7 @@ export function canUseTool(agentId: string, toolId: string): boolean {
  * Get all tools an agent is allowed to use
  */
 export function getAllowedTools(agentId: string): ToolDefinition[] {
-  const access = AGENT_TOOL_ACCESS[agentId];
+  const access = AGENT_TOOL_ACCESS[resolveBaseAgentId(agentId)];
   if (!access) return [];
 
   // Wildcard access (executor)
@@ -1187,7 +1192,7 @@ export function validateToolInput(toolId: string, input: unknown): { success: tr
  * Get permission level for an agent
  */
 export function getAgentPermissionLevel(agentId: string): PermissionLevel | undefined {
-  return AGENT_TOOL_ACCESS[agentId]?.permission;
+  return AGENT_TOOL_ACCESS[resolveBaseAgentId(agentId)]?.permission;
 }
 
 /**

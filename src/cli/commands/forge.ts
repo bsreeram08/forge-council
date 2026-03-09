@@ -52,6 +52,7 @@ export async function forgeCommand(idea: string, options?: ForgeOptions): Promis
       idea,
       config,
       mode,
+      projectRoot: process.cwd(),
       customAgentIds: options?.agents,
     });
 

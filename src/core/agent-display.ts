@@ -89,7 +89,9 @@ export class AgentDisplay {
       let role = '';
       try {
         const persona = loadPersona(id);
-        codename = persona.codename;
+        // For suffixed agents (coder-1, coder-2), append the number to the codename
+        const suffixMatch = id.match(/-(\d+)$/);
+        codename = suffixMatch ? `${persona.codename}-${suffixMatch[1]}` : persona.codename;
         role = persona.displayName;
       } catch { /* use id as codename */ }
 

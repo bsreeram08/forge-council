@@ -278,10 +278,15 @@ class SessionStore {
 
   // --- Logs ---
 
-  appendLog(sessionId: string, level: LogEntry['level'], source: string, message: string): void {
-    this.db.prepare(`
+  /**
+   * Append a log row to the logs table. Returns the inserted row id.
+   */
+  appendLog(sessionId: string, level: LogEntry['level'], source: string, message: string): number {
+    const res = this.db.prepare(`
       INSERT INTO logs (session_id, level, source, message) VALUES ($sid, $level, $source, $msg)
     `).run({ $sid: sessionId, $level: level, $source: source, $msg: message });
+    // @ts-ignore - Bun's sqlite returns lastInsertRowid
+    return typeof res?.lastInsertRowid === 'number' ? res.lastInsertRowid as number : 0;
   }
 
   getLogs(sessionId: string, afterId = 0, limit = 200): LogEntry[] {

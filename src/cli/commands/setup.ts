@@ -28,31 +28,97 @@ interface ProviderMeta {
   description: string;
 }
 
-const PROVIDER_META: Record<string, ProviderMeta> = {
+type ProviderCategory = 'premium' | 'gateway' | 'budget' | 'included';
+
+interface ProviderMetaExt extends ProviderMeta {
+  category: ProviderCategory;
+}
+
+const PROVIDER_META: Record<string, ProviderMetaExt> = {
   anthropic: {
     envVar: 'ANTHROPIC_API_KEY',
     label: 'Anthropic',
     hint: 'Claude Opus 4.6, Sonnet 4.6, Haiku 4.5',
     description: 'Direct access to Claude models via the Anthropic API',
+    category: 'premium',
   },
   openai: {
     envVar: 'OPENAI_API_KEY',
     label: 'OpenAI',
     hint: 'GPT-5.4, GPT-5.2, o3, o4-mini',
     description: 'Direct access to OpenAI models',
+    category: 'premium',
+  },
+  google: {
+    envVar: 'GOOGLE_API_KEY',
+    label: 'Google AI',
+    hint: 'Gemini 2.5 Pro, Gemini 2.5 Flash',
+    description: 'Direct access to Gemini models via Google AI Studio',
+    category: 'premium',
+  },
+  xai: {
+    envVar: 'XAI_API_KEY',
+    label: 'xAI',
+    hint: 'Grok 3, Grok 3 Mini',
+    description: 'Direct access to Grok models via xAI API',
+    category: 'premium',
   },
   openrouter: {
     envVar: 'OPENROUTER_API_KEY',
     label: 'OpenRouter',
     hint: 'Claude, GPT, Gemini, DeepSeek & 200+ models',
     description: 'Access 200+ models through a single API gateway',
+    category: 'gateway',
   },
   copilot: {
     envVar: 'GITHUB_TOKEN',
     label: 'GitHub Copilot',
-    hint: 'Claude, GPT-5.x, Gemini — included with subscription',
+    hint: 'Claude, GPT-5.x, Gemini, OpenCode Zen — included with subscription',
     description: 'Use models through GitHub Copilot (OAuth login or $GITHUB_TOKEN)',
+    category: 'included',
   },
+  groq: {
+    envVar: 'GROQ_API_KEY',
+    label: 'Groq',
+    hint: 'Llama 3.3, Llama 4 Scout, DeepSeek R1 — ultrafast inference',
+    description: 'Ultrafast inference for open-source models via Groq LPU',
+    category: 'budget',
+  },
+  deepseek: {
+    envVar: 'DEEPSEEK_API_KEY',
+    label: 'DeepSeek',
+    hint: 'DeepSeek V3, DeepSeek R1',
+    description: 'Direct access to DeepSeek models — strong reasoning at low cost',
+    category: 'budget',
+  },
+  mistral: {
+    envVar: 'MISTRAL_API_KEY',
+    label: 'Mistral',
+    hint: 'Codestral, Mistral Large',
+    description: 'Direct access to Mistral models — Codestral excels at code',
+    category: 'budget',
+  },
+  together: {
+    envVar: 'TOGETHER_API_KEY',
+    label: 'Together AI',
+    hint: 'Llama, Qwen, DeepSeek R1 — serverless open-source models',
+    description: 'Run open-source models via Together AI',
+    category: 'budget',
+  },
+  antigravity: {
+    envVar: '',
+    label: 'Antigravity (Google)',
+    hint: 'Gemini 3, Claude Opus/Sonnet, GPT-OSS — FREE via local proxy',
+    description: 'Access premium models free via Antigravity proxy (requires anti-api or antigravity-gateway running locally)',
+    category: 'included',
+  },
+};
+
+const CATEGORY_LABELS: Record<ProviderCategory, string> = {
+  included: 'Included with subscription',
+  premium: 'Premium providers (direct API)',
+  gateway: 'Gateway (multi-provider)',
+  budget: 'Budget & open-source',
 };
 
 // ---------------------------------------------------------------------------
@@ -101,13 +167,29 @@ function statusBadge(status: 'configured' | 'env-found' | 'not-configured'): str
 interface ModelOption {
   value: string;
   label: string;
-  hint: string;
+  hint?: string;
+  disabled?: boolean;
 }
 
-function getGroupedModelOptions(config: ForgeCouncilConfig): ModelOption[] {
+/**
+ * Model options with provider prefix in label — for autocomplete search.
+ * Sorted: ready providers first, then by category (included > premium > gateway > budget).
+ */
+function getModelOptionsFlat(config: ForgeCouncilConfig): ModelOption[] {
   const options: ModelOption[] = [];
 
-  for (const [providerName, provider] of Object.entries(config.models.providers)) {
+  // Same sort as grouped
+  const categoryOrder: ProviderCategory[] = ['included', 'premium', 'gateway', 'budget'];
+  const sortedProviders = Object.entries(config.models.providers).sort(([a], [b]) => {
+    const statusA = getProviderStatus(a, config) !== 'not-configured' ? 0 : 1;
+    const statusB = getProviderStatus(b, config) !== 'not-configured' ? 0 : 1;
+    if (statusA !== statusB) return statusA - statusB;
+    const catA = categoryOrder.indexOf(PROVIDER_META[a]?.category ?? 'budget');
+    const catB = categoryOrder.indexOf(PROVIDER_META[b]?.category ?? 'budget');
+    return catA - catB;
+  });
+
+  for (const [providerName, provider] of sortedProviders) {
     const meta = PROVIDER_META[providerName];
     const providerLabel = meta?.label ?? providerName;
     const status = getProviderStatus(providerName, config);
@@ -117,23 +199,18 @@ function getGroupedModelOptions(config: ForgeCouncilConfig): ModelOption[] {
       const ref = `${providerName}/${model.id}`;
       const parts: string[] = [];
 
-      // Context window
       const ctxK = model.contextWindow >= 1_000_000
         ? `${(model.contextWindow / 1_000_000).toFixed(0)}M`
         : `${(model.contextWindow / 1000).toFixed(0)}k`;
       parts.push(`${ctxK} ctx`);
 
-      // Cost
       if (model.cost.input === 0 && model.cost.output === 0) {
         parts.push('included');
       } else {
         parts.push(`$${model.cost.input}/$${model.cost.output}`);
       }
 
-      // Reasoning
       if (model.reasoning) parts.push('reasoning');
-
-      // Status
       if (!ready) parts.push('needs key');
 
       options.push({
@@ -154,22 +231,39 @@ function buildConfigSummary(config: ForgeCouncilConfig): string {
   const readyProviders = providerNames.filter(
     (name) => getProviderStatus(name, config) !== 'not-configured',
   );
-  lines.push(`Providers:  ${readyProviders.length}/${providerNames.length} ready (${providerNames.join(', ')})`);
 
   let modelCount = 0;
   for (const provider of Object.values(config.models.providers)) {
     modelCount += provider.models.length;
   }
+
+  lines.push(`Providers:  ${readyProviders.length}/${providerNames.length} ready`);
+  for (const name of providerNames) {
+    const meta = PROVIDER_META[name];
+    const status = getProviderStatus(name, config);
+    const count = config.models.providers[name]?.models.length ?? 0;
+    const badge = name === 'copilot' ? copilotStatusLabel() : statusBadge(status);
+    const label = meta?.label ?? name;
+    lines.push(`  ${badge.padEnd(14)} ${label} (${count} models)`);
+  }
+
+  lines.push('');
   lines.push(`Models:     ${modelCount} available`);
 
   const registry = new AgentRegistry(config);
   const enabled = registry.listEnabled();
   lines.push(`Agents:     ${enabled.length}/${AGENT_DEFS.length} active`);
-  for (const def of AGENT_DEFS) {
-    const isActive = enabled.some((e) => e.id === def.id);
-    const model = registry.getModelFor(def.id);
-    const bullet = isActive ? '+' : '-';
-    lines.push(`  ${bullet} ${def.name.padEnd(14)} ${model}`);
+
+  for (const group of AGENT_GROUPS) {
+    lines.push(`  ${group.label}:`);
+    for (const id of group.ids) {
+      const def = AGENT_DEFS.find(d => d.id === id);
+      if (!def) continue;
+      const isActive = enabled.some((e) => e.id === def.id);
+      const model = registry.getModelFor(def.id);
+      const bullet = isActive ? '+' : '-';
+      lines.push(`    ${bullet} ${def.name.padEnd(12)} ${model}`);
+    }
   }
 
   lines.push('');
@@ -420,28 +514,63 @@ async function configureProviderKey(providerName: string, config: ForgeCouncilCo
   });
 
   if (!p.isCancel(shouldTest) && shouldTest) {
-    await testProvider(providerName, config);
+    const ok = await testProvider(providerName, config);
+    if (ok) {
+      const saveNow = await p.confirm({ message: 'Save config now?', initialValue: true });
+      if (!p.isCancel(saveNow) && saveNow) {
+        await saveConfig(config);
+      }
+    }
   }
 }
 
 async function providerManager(config: ForgeCouncilConfig): Promise<void> {
   while (true) {
+    // Auto-detect available API keys on each loop
+    const detectedKeys: string[] = [];
+    for (const [name, meta] of Object.entries(PROVIDER_META)) {
+      if (name === 'copilot') continue;
+      const status = getProviderStatus(name, config);
+      if (status === 'not-configured' && process.env[meta.envVar]) {
+        detectedKeys.push(name);
+      }
+    }
+    if (detectedKeys.length > 0) {
+      p.log.info(`Detected API keys in environment: ${detectedKeys.map(k => PROVIDER_META[k]!.label).join(', ')}`);
+    }
+
     // Include custom providers that aren't in PROVIDER_META
     const allProviders = Object.keys(config.models.providers);
     const customProviders = allProviders.filter((name) => !PROVIDER_META[name]);
 
-    const providerOptions = Object.entries(PROVIDER_META).map(([name, meta]) => {
-      const status = getProviderStatus(name, config);
-      const modelCount = config.models.providers[name]?.models.length ?? 0;
-      const badge = name === 'copilot' ? copilotStatusLabel() : statusBadge(status);
-      return {
-        value: name,
-        label: `${meta.label}  ${badge}`,
-        hint: `${meta.hint} | ${modelCount} models`,
-      };
-    });
+    // Group providers by category with disabled headers
+    const categories: ProviderCategory[] = ['included', 'premium', 'gateway', 'budget'];
+    type ProviderOption = { value: string; label: string; hint?: string; disabled?: boolean };
+    const groupedOptions: ProviderOption[] = [];
 
-    const customOptions = customProviders.map((name) => {
+    for (const category of categories) {
+      const providersInCategory = Object.entries(PROVIDER_META).filter(([, m]) => m.category === category);
+      if (providersInCategory.length === 0) continue;
+
+      groupedOptions.push({
+        value: `__sep_${category}__`,
+        label: CATEGORY_LABELS[category],
+        disabled: true,
+      });
+
+      for (const [name, meta] of providersInCategory) {
+        const status = getProviderStatus(name, config);
+        const modelCount = config.models.providers[name]?.models.length ?? 0;
+        const badge = name === 'copilot' ? copilotStatusLabel() : statusBadge(status);
+        groupedOptions.push({
+          value: name,
+          label: `${meta.label}  ${badge}`,
+          hint: `${modelCount} models`,
+        });
+      }
+    }
+
+    const customOptions: ProviderOption[] = customProviders.map((name) => {
       const provider = config.models.providers[name]!;
       const status = getProviderStatus(name, config);
       return {
@@ -451,14 +580,29 @@ async function providerManager(config: ForgeCouncilConfig): Promise<void> {
       };
     });
 
-    const choice = await p.select({
+    if (customOptions.length > 0) {
+      groupedOptions.push({
+        value: '__sep_custom__',
+        label: 'Custom providers',
+        disabled: true,
+      });
+      groupedOptions.push(...customOptions);
+    }
+
+    // Flatten for autocomplete — remove disabled items and add action options
+    const selectableProviders: Array<{ value: string; label: string; hint?: string }> = groupedOptions
+      .filter(o => !o.disabled)
+      .map(o => ({ value: o.value, label: o.label, hint: o.hint }));
+
+    selectableProviders.push(
+      { value: 'custom', label: 'Add custom provider', hint: 'OpenAI or Anthropic compatible' },
+      { value: '__back__', label: 'Back' },
+    );
+
+    const choice = await p.autocomplete({
       message: 'Configure a provider',
-      options: [
-        ...providerOptions,
-        ...customOptions,
-        { value: 'custom', label: 'Add custom provider', hint: 'OpenAI or Anthropic compatible' },
-        { value: '__back__', label: 'Back' },
-      ],
+      placeholder: 'Type to search providers...',
+      options: selectableProviders,
     });
 
     if (p.isCancel(choice) || choice === '__back__') break;
@@ -510,7 +654,17 @@ async function providerManager(config: ForgeCouncilConfig): Promise<void> {
         if (p.isCancel(keep) || !keep) {
           delete config.models.providers[details.name];
           p.log.info(`Removed "${details.name}".`);
+          continue;
         }
+      }
+
+      // Offer immediate save so custom providers aren't lost
+      const saveNow = await p.confirm({
+        message: 'Save config now?',
+        initialValue: true,
+      });
+      if (!p.isCancel(saveNow) && saveNow) {
+        await saveConfig(config);
       }
       continue;
     }
@@ -578,17 +732,21 @@ async function selectModel(
   config: ForgeCouncilConfig,
   currentValue?: string,
 ): Promise<string | symbol> {
-  const options = getGroupedModelOptions(config);
+  const options = getModelOptionsFlat(config);
   if (options.length === 0) {
     p.log.warn('No models configured. Configure a provider first.');
     return Symbol.for('clack:cancel');
   }
 
-  return p.select({
+  return p.autocomplete({
     message,
+    placeholder: 'Type to search models...',
     options: options.map((m) => ({
-      ...m,
-      hint: m.value === currentValue ? `${m.hint} (current)` : m.hint,
+      value: m.value,
+      label: m.label!,
+      hint: m.value === currentValue
+        ? `${m.hint ? m.hint + ' | ' : ''}current`
+        : m.hint,
     })),
     initialValue: currentValue,
   });
@@ -600,24 +758,23 @@ async function selectFallbacks(
   currentValues: string[],
   primaryModel?: string,
 ): Promise<string[] | symbol> {
-  const options = getGroupedModelOptions(config).filter((model) => model.value !== primaryModel);
+  const options = getModelOptionsFlat(config).filter((model) => model.value !== primaryModel);
   if (options.length === 0) {
     p.log.warn('No fallback models available. Configure providers first.');
     return Symbol.for('clack:cancel');
   }
 
-  const selected = await p.multiselect({
+  return p.autocompleteMultiselect({
     message,
+    placeholder: 'Type to search models...',
     options: options.map((model) => ({
       value: model.value,
-      label: model.label,
-      hint: model.value === primaryModel ? `${model.hint} (primary)` : model.hint,
+      label: model.label!,
+      hint: model.hint,
     })),
     initialValues: currentValues,
     required: false,
   });
-
-  return selected;
 }
 
 async function manageAgent(def: AgentDef, config: ForgeCouncilConfig): Promise<void> {
@@ -692,40 +849,159 @@ async function manageAgent(def: AgentDef, config: ForgeCouncilConfig): Promise<v
   }
 }
 
+// Agent role groups for organized display
+const AGENT_GROUPS: Array<{ label: string; ids: readonly string[] }> = [
+  { label: 'Core (always active)', ids: ['executor', 'coder'] },
+  { label: 'Planning agents', ids: ['architect', 'planner', 'researcher'] },
+  { label: 'Review agents', ids: ['reviewer', 'security', 'qa', 'integrator', 'designer'] },
+  { label: 'On-demand agents', ids: ['spec-agent', 'docs'] },
+];
+
+interface AgentPreset {
+  value: string;
+  label: string;
+  hint: string;
+  agents: Record<string, boolean>;
+}
+
+const AGENT_PRESETS: AgentPreset[] = [
+  {
+    value: 'minimal',
+    label: 'Minimal',
+    hint: 'Core + architect only — fastest',
+    agents: { architect: true, planner: false, researcher: false, reviewer: false, security: false, qa: false, integrator: false, designer: false, 'spec-agent': false, docs: false },
+  },
+  {
+    value: 'default',
+    label: 'Default (Ship)',
+    hint: '3 planners + targeted review',
+    agents: { architect: true, planner: true, researcher: true, reviewer: true, security: true, qa: true, integrator: true, designer: true, 'spec-agent': false, docs: false },
+  },
+  {
+    value: 'council',
+    label: 'Full Council',
+    hint: 'All agents — thorough',
+    agents: { architect: true, planner: true, researcher: true, reviewer: true, security: true, qa: true, integrator: true, designer: true, 'spec-agent': true, docs: true },
+  },
+  {
+    value: 'code-focused',
+    label: 'Code Focused',
+    hint: 'Architect + code quality + security',
+    agents: { architect: true, planner: false, researcher: false, reviewer: true, security: true, qa: true, integrator: false, designer: false, 'spec-agent': false, docs: false },
+  },
+];
+
+async function applyAgentPreset(preset: AgentPreset, config: ForgeCouncilConfig): Promise<void> {
+  if (!config.agents.overrides) config.agents.overrides = {};
+  for (const [id, enabled] of Object.entries(preset.agents)) {
+    const def = AGENT_DEFS.find(d => d.id === id);
+    if (!def || def.required) continue;
+    config.agents.overrides[id] = {
+      ...config.agents.overrides[id],
+      enabled,
+    };
+  }
+  const activeCount = Object.values(preset.agents).filter(Boolean).length + 2; // +2 for core
+  p.log.success(`Applied "${preset.label}" preset — ${activeCount} agents active.`);
+}
+
+async function bulkAssignModel(config: ForgeCouncilConfig, agentIds: string[]): Promise<void> {
+  const model = await selectModel('Model for selected agents:', config);
+  if (p.isCancel(model)) return;
+  if (!config.agents.overrides) config.agents.overrides = {};
+  for (const id of agentIds) {
+    config.agents.overrides[id] = {
+      ...config.agents.overrides[id],
+      model: { primary: model },
+    };
+  }
+  p.log.success(`Set ${agentIds.length} agents to ${model}`);
+}
+
 async function agentManager(config: ForgeCouncilConfig): Promise<void> {
   while (true) {
     const registry = new AgentRegistry(config);
     const enabled = registry.listEnabled();
     const disabled = registry.listDisabled();
 
-    const agentOptions = AGENT_DEFS.map((def) => {
-      const isActive = enabled.some((e) => e.id === def.id);
-      const modelRef = registry.getModelFor(def.id);
-      const statusIcon = isActive ? '+' : '-';
-      return {
-        value: def.id,
-        label: `${statusIcon} ${def.name} — ${def.role}`,
-        hint: modelRef,
-      };
-    });
+    // Build grouped agent options with disabled headers
+    type AgentOption = { value: string; label: string; hint?: string; disabled?: boolean };
+    const groupedOptions: AgentOption[] = [];
 
-    const choice = await p.select({
+    for (const group of AGENT_GROUPS) {
+      groupedOptions.push({
+        value: `__sep_${group.label}__`,
+        label: group.label,
+        disabled: true,
+      });
+
+      for (const id of group.ids) {
+        const def = AGENT_DEFS.find(d => d.id === id);
+        if (!def) continue;
+        const isActive = enabled.some((e) => e.id === def.id);
+        const modelRef = registry.getModelFor(def.id);
+        const statusIcon = isActive ? '+' : '-';
+        groupedOptions.push({
+          value: def.id,
+          label: `${statusIcon} ${def.name} — ${def.role}`,
+          hint: modelRef,
+        });
+      }
+    }
+
+    // Combine agent options + config actions — all selectable
+    const allAgentOptions: Array<{ value: string; label: string; hint?: string }> = groupedOptions
+      .filter(o => !o.disabled)
+      .map(o => ({ value: o.value, label: o.label, hint: o.hint }));
+
+    allAgentOptions.push(
+      { value: '__presets__', label: 'Apply a preset', hint: 'Minimal / Default / Council / Code Focused' },
+      { value: '__bulk_plan__', label: 'Bulk-assign model to planners', hint: 'architect, planner, researcher' },
+      { value: '__bulk_review__', label: 'Bulk-assign model to reviewers', hint: 'reviewer, security, qa, integrator, designer' },
+      { value: '__defaults__', label: 'Change default model', hint: config.agents.defaults.model.primary },
+      {
+        value: '__default_fallbacks__',
+        label: 'Edit default fallbacks',
+        hint: (config.agents.defaults.model.fallbacks ?? []).length > 0
+          ? (config.agents.defaults.model.fallbacks ?? []).join(' -> ')
+          : '(none)',
+      },
+      { value: '__back__', label: 'Back' },
+    );
+
+    const choice = await p.autocomplete({
       message: `Agents (${enabled.length} active, ${disabled.length} disabled)`,
-      options: [
-        ...agentOptions,
-        { value: '__defaults__', label: 'Change default model', hint: config.agents.defaults.model.primary },
-        {
-          value: '__default_fallbacks__',
-          label: 'Edit default fallbacks',
-          hint: (config.agents.defaults.model.fallbacks ?? []).length > 0
-            ? (config.agents.defaults.model.fallbacks ?? []).join(' -> ')
-            : '(none)',
-        },
-        { value: '__back__', label: 'Back' },
-      ],
+      placeholder: 'Type to search agents...',
+      options: allAgentOptions,
     });
 
     if (p.isCancel(choice) || choice === '__back__') break;
+
+    if (choice === '__presets__') {
+      const preset = await p.select({
+        message: 'Select a preset',
+        options: AGENT_PRESETS.map(p => ({
+          value: p.value,
+          label: p.label,
+          hint: p.hint,
+        })),
+      });
+      if (!p.isCancel(preset)) {
+        const selected = AGENT_PRESETS.find(p => p.value === preset);
+        if (selected) await applyAgentPreset(selected, config);
+      }
+      continue;
+    }
+
+    if (choice === '__bulk_plan__') {
+      await bulkAssignModel(config, ['architect', 'planner', 'researcher']);
+      continue;
+    }
+
+    if (choice === '__bulk_review__') {
+      await bulkAssignModel(config, ['reviewer', 'security', 'qa', 'integrator', 'designer']);
+      continue;
+    }
 
     if (choice === '__defaults__') {
       const model = await selectModel(

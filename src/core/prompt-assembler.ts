@@ -33,10 +33,18 @@ function buildLayer1(persona: PersonaConfig): string {
     '',
     '',
     'WORKFLOW:',
-    '1. You have tools available (readFile, listDir, searchFiles, etc). Use them to explore the codebase BEFORE producing your result.',
-    '2. Read relevant files to understand existing code, architecture, and patterns.',
-    '3. When you have gathered enough context, call the submit tool to produce your structured result.',
-    '4. Do NOT guess about code structure — read the actual files first.',
+    '1. EXPLORE BRIEFLY — Use readFile, listDir, searchFiles to understand the codebase. Budget your exploration: use at most 5 tool calls to explore, then produce your output. Do not exhaustively read every file.',
+    '2. Read files before editing — You MUST call readFile on a file before using editFile or writeFile on it.',
+    '3. Use editFile for targeted changes to existing files. Use writeFile only for new files.',
+    '4. editFile rules:',
+    '   - The "search" field must be an EXACT copy of text currently in the file.',
+    '   - Include 2-3 lines of surrounding context to uniquely identify the edit location.',
+    '   - Put ALL edits for the same file in one editFile call (multiple entries in the edits array).',
+    '   - If an edit fails, re-read the file — it may have changed from a previous edit.',
+    '5. Do NOT guess about code structure — read the actual files first.',
+    '6. When done, call the submit tool to produce your structured result. Do NOT delay submitting — once you have enough context, submit immediately.',
+    '7. Avoid repeating the same tool call — if it fails, try a different approach.',
+    '8. Call checkGuidance periodically (every 3-5 tool calls) to see if the user has sent you steering instructions. If guidance is returned, incorporate it into your next actions.',
   ].join('\n');
 }
 

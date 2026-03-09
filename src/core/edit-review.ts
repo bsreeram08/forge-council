@@ -41,32 +41,163 @@ export interface EditReviewResult {
 // Diff display
 // ---------------------------------------------------------------------------
 
-function computeSimpleDiff(original: string, modified: string): string {
+// ---------------------------------------------------------------------------
+// LCS-based unified diff
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute LCS table for two arrays of lines.
+ * Returns a 2D table where dp[i][j] = length of LCS of a[0..i-1] and b[0..j-1].
+ */
+function lcsTable(a: string[], b: string[]): number[][] {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i]![j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1]![j - 1]! + 1
+        : Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
+    }
+  }
+  return dp;
+}
+
+interface DiffLine {
+  type: ' ' | '-' | '+';
+  content: string;
+  oldLine?: number;
+  newLine?: number;
+}
+
+/**
+ * Backtrack through LCS table to produce diff lines.
+ */
+function diffLines(a: string[], b: string[], dp: number[][]): DiffLine[] {
+  const result: DiffLine[] = [];
+  let i = a.length;
+  let j = b.length;
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
+      result.push({ type: ' ', content: a[i - 1]!, oldLine: i, newLine: j });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i]![j - 1]! >= dp[i - 1]![j]!)) {
+      result.push({ type: '+', content: b[j - 1]!, newLine: j });
+      j--;
+    } else {
+      result.push({ type: '-', content: a[i - 1]!, oldLine: i });
+      i--;
+    }
+  }
+
+  return result.reverse();
+}
+
+interface Hunk {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  lines: DiffLine[];
+}
+
+/**
+ * Group diff lines into hunks with context lines.
+ */
+function buildHunks(diffs: DiffLine[], contextLines: number): Hunk[] {
+  // Find change indices
+  const changeIndices: number[] = [];
+  for (let i = 0; i < diffs.length; i++) {
+    if (diffs[i]!.type !== ' ') changeIndices.push(i);
+  }
+
+  if (changeIndices.length === 0) return [];
+
+  // Group changes into hunks, merging those within 2*contextLines of each other
+  const groups: Array<[number, number]> = [];
+  let start = changeIndices[0]!;
+  let end = changeIndices[0]!;
+
+  for (let i = 1; i < changeIndices.length; i++) {
+    if (changeIndices[i]! - end <= contextLines * 2) {
+      end = changeIndices[i]!;
+    } else {
+      groups.push([start, end]);
+      start = changeIndices[i]!;
+      end = changeIndices[i]!;
+    }
+  }
+  groups.push([start, end]);
+
+  // Build hunks with context
+  const hunks: Hunk[] = [];
+  for (const [gs, ge] of groups) {
+    const hunkStart = Math.max(0, gs - contextLines);
+    const hunkEnd = Math.min(diffs.length - 1, ge + contextLines);
+    const hunkLines = diffs.slice(hunkStart, hunkEnd + 1);
+
+    const oldLines = hunkLines.filter(l => l.type !== '+');
+    const newLines = hunkLines.filter(l => l.type !== '-');
+    const firstOld = hunkLines.find(l => l.oldLine !== undefined);
+    const firstNew = hunkLines.find(l => l.newLine !== undefined);
+
+    hunks.push({
+      oldStart: firstOld?.oldLine ?? 1,
+      oldCount: oldLines.length,
+      newStart: firstNew?.newLine ?? 1,
+      newCount: newLines.length,
+      lines: hunkLines,
+    });
+  }
+
+  return hunks;
+}
+
+/**
+ * Compute a unified diff between two strings.
+ * Exported for testing and for use in the review display.
+ */
+export function computeUnifiedDiff(
+  original: string,
+  modified: string,
+  filePath: string,
+  contextLines = 3,
+): string {
+  if (original === modified) return '  (no changes)';
+
   const origLines = original.split('\n');
   const modLines = modified.split('\n');
-  const lines: string[] = [];
 
-  const maxLen = Math.max(origLines.length, modLines.length);
-  for (let i = 0; i < maxLen; i++) {
-    const orig = origLines[i];
-    const mod = modLines[i];
+  // For very large files, fall back to a simple summary
+  if (origLines.length > 1000 || modLines.length > 1000) {
+    const added = modLines.length - origLines.length;
+    return `  (large file: ${origLines.length} → ${modLines.length} lines, ${added >= 0 ? '+' : ''}${added})`;
+  }
 
-    if (orig === undefined && mod !== undefined) {
-      lines.push(`+ ${mod}`);
-    } else if (orig !== undefined && mod === undefined) {
-      lines.push(`- ${orig}`);
-    } else if (orig !== mod) {
-      lines.push(`- ${orig}`);
-      lines.push(`+ ${mod}`);
+  const dp = lcsTable(origLines, modLines);
+  const diffs = diffLines(origLines, modLines, dp);
+  const hunks = buildHunks(diffs, contextLines);
+
+  if (hunks.length === 0) return '  (no changes)';
+
+  const output: string[] = [
+    `--- a/${filePath}`,
+    `+++ b/${filePath}`,
+  ];
+
+  for (const hunk of hunks) {
+    output.push(`@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`);
+    for (const line of hunk.lines) {
+      output.push(`${line.type}${line.content}`);
     }
-    // Skip unchanged lines for brevity (show context around changes)
   }
 
-  if (lines.length === 0) return '  (no changes)';
-  if (lines.length > 60) {
-    return lines.slice(0, 60).join('\n') + `\n  ... (${lines.length - 60} more lines)`;
+  const result = output.join('\n');
+  if (result.split('\n').length > 80) {
+    return result.split('\n').slice(0, 80).join('\n') + `\n  ... (truncated)`;
   }
-  return lines.join('\n');
+  return result;
 }
 
 function formatFileHeader(change: FileChange): string {
@@ -180,7 +311,7 @@ export async function reviewChanges(
   for (const change of changes) {
     // Show diff
     if (change.originalContent) {
-      const diff = computeSimpleDiff(change.originalContent, change.content);
+      const diff = computeUnifiedDiff(change.originalContent, change.content, change.path);
       p.note(diff, formatFileHeader(change));
     } else if (change.action === 'create') {
       const preview = change.content.split('\n').slice(0, 30).join('\n');
