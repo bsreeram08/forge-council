@@ -39,12 +39,40 @@ bun run dev              # Run the CLI
 
 Every agent call goes through the same layered prompt assembly. Only Layer 1 content differs per persona.
 
-- **Layer 1 (General)**: System prompt + skills + persona config (static per agent)
+- **Layer 1 (General)**: System prompt + skills (first-class) + persona config (static per agent)
 - **Layer 2 (Intent)**: User idea + intent classification + phase context + user guidance
-- **Layer 3 (Supporting Context)**: Code files, file tree, git log, external docs — assembled once by the intent classifier, then frozen. No mid-call retrieval.
+- **Layer 3 (Supporting Context)**: Code files via QMD semantic search or glob fallback. In RLM mode: context handle metadata instead of inline content.
 - **Layer 4 (Plan)**: Only on planning Pass 2 — adds the merged plan + all Pass 1 contributions. 2/3 agreement required to add/remove items.
 
 The **intent classifier** is a cheap fast model call (~200 tokens) that runs before any agent call. Returns structured data: taskType, domains, filePatterns to load, complexity estimate.
+
+### Skills System
+
+Skills are first-class entities (not just string labels). A Skill = tool bundle + prompt template + domain knowledge + activation conditions. Agents reference skills by ID. Skills can be shared across agents and auto-activate based on intent classification.
+
+- **Built-in skills** (12): system-design, project-planning, tech-research, implementation, code-review, security-audit, testing, infrastructure, ux-design, documentation, context-search, recursive-analysis
+- **Custom skills**: `~/.forgecouncil/skills/*.json` (global) + `.forgecouncil/skills/*.json` (project)
+- **Prompt injection**: Layer 1 now injects full skill context (description + prompt template + knowledge base), not just skill names
+- **Auto-activation**: Skills can auto-activate based on intent classification domains (e.g., security-audit activates when auth/payments domains detected)
+
+### QMD Integration (Semantic Search)
+
+QMD (`@tobilu/qmd`) provides on-device BM25 + vector + LLM reranking search. It serves as the primary context source for the context assembler.
+
+- **Smart assembly**: `assembleContextSmart()` uses QMD when available, falls back to glob-based file loading
+- **Agent tools**: `searchCodebase`, `searchDocs`, `getFileContext` — available to all agents when QMD is ready
+- **Config**: `qmd` section in config — enabled, storePath, indexOnStart, excludePatterns, collections, minScore
+
+### RLM (Recursive Language Models)
+
+Based on the paper "Recursive Language Models" (arXiv 2512.24601v2). For large codebases that exceed context windows:
+
+- **Context handles**: Large context stored externally, agents receive only metadata (summary, structure, token count)
+- **Examination tools**: peekContext, searchContext, readChunk, decomposeContext — agents explore context on demand
+- **Sub-agent spawning**: Agents can recursively call sub-agents on context chunks via `spawnSubAgent`
+- **Auto-activation**: When assembled context exceeds `rlm.contextThreshold` (default 50K tokens), RLM mode activates
+- **Safety guards**: Max recursion depth (3), max sub-agent calls (10), sub-agent token budget fraction
+- **Config**: `rlm` section — enabled, contextThreshold, maxDepth, maxSubAgentCalls, subAgentBudgetFraction
 
 ### Agent Roster
 
@@ -127,8 +155,17 @@ AI-generated file changes go through an edit review step where the user can:
 | `src/core/agent-tools.ts` | AI SDK tool adapters for agent tool calling |
 | `src/core/edit-review.ts` | Accept/reject AI file changes with diff display |
 | `src/core/workflow.ts` | V4 workflow: generateText + tools pattern |
-| `src/core/prompt-assembler.ts` | 4-layer prompt assembly |
+| `src/core/prompt-assembler.ts` | 4-layer prompt assembly (skill-aware, RLM-aware) |
 | `src/core/intent-classifier.ts` | Intent classification with keyword fallback |
+| `src/core/skill.ts` | Skill interface, SkillRegistry, composition |
+| `src/core/builtin-skills.ts` | 12 built-in skills + agent→skill mapping |
+| `src/core/skill-loader.ts` | Custom skill loading from config directories |
+| `src/core/qmd-store.ts` | QMD SDK integration for semantic search |
+| `src/core/qmd-tools.ts` | QMD-backed agent tools (searchCodebase, searchDocs) |
+| `src/core/rlm/context-handle.ts` | Context handle abstraction + handle store |
+| `src/core/rlm/rlm-tools.ts` | RLM examination tools (peek, search, read, decompose) |
+| `src/core/rlm/sub-agent.ts` | Sub-agent spawning with safety guards |
+| `src/core/rlm/index.ts` | RLM public API + shouldUseRlm + setupRlm |
 
 ## Config System
 
@@ -138,7 +175,9 @@ Two config locations merged (project overrides global):
 
 Model references: `provider/modelId` (e.g., `anthropic/claude-opus-4-6`). Resolution chain: agent override → agent defaults → fallback. Providers: Anthropic, OpenAI, OpenRouter, GitHub Copilot, custom OpenAI-compatible.
 
-Personas are configurable via YAML (`personas/defaults/<agent>.yaml`) with: systemPrompt, skills, behavioralRules, catchphrases, model, temperature, harshness.
+Personas are configurable via YAML (`personas/defaults/<agent>.yaml`) with: systemPrompt, skills, skillIds, behavioralRules, catchphrases, model, temperature, harshness.
+
+Custom skills: `~/.forgecouncil/skills/*.json` (global) + `.forgecouncil/skills/*.json` (project). Fields: id, name, description, domains, tools, promptTemplate, knowledgeBase, priority.
 
 ## Tool System
 

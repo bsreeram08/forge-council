@@ -1,6 +1,7 @@
 import type { IntentClassification } from './schemas.ts';
 import type { ForgeCouncilConfig } from '../config/schema.ts';
 import { estimateTokens } from './token-counter.ts';
+import { getQmdStore, type QmdStoreManager } from './qmd-store.ts';
 
 // ---------------------------------------------------------------------------
 // Assembled Context — static, frozen after assembly
@@ -230,6 +231,133 @@ export async function assembleContext(
   }
 
   return context;
+}
+
+// ---------------------------------------------------------------------------
+// QMD-based Context Assembly — uses semantic search for relevance-ranked loading
+// ---------------------------------------------------------------------------
+
+export async function assembleContextFromQmd(
+  classification: IntentClassification,
+  qmdStore: QmdStoreManager,
+  projectRoot?: string,
+  options?: AssembleContextOptions,
+): Promise<AssembledContext> {
+  const maxContextTokens = options?.maxTokens
+    ?? (options?.configContextWindow
+      ? Math.max(Math.floor(options.configContextWindow * 0.6) - PROMPT_OVERHEAD_TOKENS, 20_000)
+      : getContextBudget(options?.modelRef));
+  const root = projectRoot ?? process.cwd();
+  const context: AssembledContext = {
+    files: [],
+    gitLog: [],
+    projectStructure: '',
+    dependencies: '',
+    externalDocs: [],
+    totalTokens: 0,
+  };
+
+  // Build search queries from classification
+  const queries: string[] = [];
+
+  // Use domains as search concepts
+  if (classification.domains.length > 0) {
+    queries.push(classification.domains.join(' '));
+  }
+
+  // Use file patterns as path-based queries
+  for (const pattern of classification.contextNeeded.filePatterns) {
+    // Convert glob to a search-friendly query
+    const cleaned = pattern.replace(/\*\*/g, '').replace(/\*/g, '').replace(/\//g, ' ').trim();
+    if (cleaned) queries.push(cleaned);
+  }
+
+  // Use task type as a query
+  queries.push(classification.taskType);
+
+  // Search QMD for each query and collect unique files
+  const seenPaths = new Set<string>();
+  for (const query of queries) {
+    if (context.totalTokens >= maxContextTokens) break;
+
+    const results = await qmdStore.search(query, { limit: 15 });
+    for (const result of results) {
+      if (seenPaths.has(result.path)) continue;
+      if (context.totalTokens >= maxContextTokens) break;
+
+      // Fetch full content
+      const doc = await qmdStore.get(result.path);
+      if (!doc) continue;
+
+      const tokens = estimateTokens(doc.content);
+      if (context.totalTokens + tokens > maxContextTokens) continue;
+
+      seenPaths.add(result.path);
+      context.files.push({ path: result.path, content: doc.content, tokens });
+      context.totalTokens += tokens;
+    }
+  }
+
+  // Load git history (same as glob-based)
+  if (classification.contextNeeded.gitLogCount > 0) {
+    try {
+      const args = [
+        'git', 'log',
+        `--max-count=${classification.contextNeeded.gitLogCount}`,
+        '--oneline', '--no-decorate',
+      ];
+      if (classification.contextNeeded.gitLogFilter) {
+        args.push(`--grep=${classification.contextNeeded.gitLogFilter}`);
+      }
+      const proc = Bun.spawn(args, { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+      const output = await new Response(proc.stdout).text();
+      if (output.trim()) {
+        context.gitLog = output.trim().split('\n');
+        context.totalTokens += estimateTokens(output);
+      }
+    } catch { /* not a git repo */ }
+  }
+
+  // Load dependencies
+  if (classification.contextNeeded.includeDependencies) {
+    try {
+      const pkgPath = `${root}/package.json`;
+      const content = await Bun.file(pkgPath).text();
+      const pkg = JSON.parse(content);
+      const slim = {
+        name: pkg.name,
+        dependencies: pkg.dependencies,
+        devDependencies: pkg.devDependencies,
+      };
+      context.dependencies = JSON.stringify(slim, null, 2);
+      context.totalTokens += estimateTokens(context.dependencies);
+    } catch { /* no package.json */ }
+  }
+
+  // External docs
+  if (classification.contextNeeded.externalDocs.length > 0) {
+    context.externalDocs = classification.contextNeeded.externalDocs.map(
+      doc => `[External doc requested: ${doc}]`,
+    );
+  }
+
+  return context;
+}
+
+// ---------------------------------------------------------------------------
+// Smart Context Assembly — uses QMD when available, falls back to glob
+// ---------------------------------------------------------------------------
+
+export async function assembleContextSmart(
+  classification: IntentClassification,
+  projectRoot?: string,
+  options?: AssembleContextOptions,
+): Promise<AssembledContext> {
+  const qmdStore = getQmdStore();
+  if (qmdStore?.isReady()) {
+    return assembleContextFromQmd(classification, qmdStore, projectRoot, options);
+  }
+  return assembleContext(classification, projectRoot, options);
 }
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,10 @@ export interface PersonaConfig {
   archetype: string;
   inspiration: string;
   systemPrompt: string;
+  /** @deprecated Display-only labels. Use skillIds for actual skill references. */
   skills: string[];
+  /** Skill IDs referencing the SkillRegistry (first-class skills) */
+  skillIds: string[];
   behavioralRules: string[];
   catchphrases: string[];
   model: string;
@@ -43,6 +46,7 @@ When merging:
 
 Produce ONLY the MergedPlan JSON. No commentary.`,
     skills: ['Plan merging', 'Deduplication', 'Priority assignment', 'Phase sequencing'],
+    skillIds: ['project-planning', 'context-search'],
     behavioralRules: [
       'Never add your own ideas — only merge what agents contributed',
       'Deduplicate aggressively — similar items become one',
@@ -80,6 +84,7 @@ Each item must be concrete and actionable — not vague principles.`,
       'Scalability and performance reasoning',
       'Code structure and module boundaries',
     ],
+    skillIds: ['system-design', 'tech-research', 'context-search'],
     behavioralRules: [
       'Reject over-engineering. Simple is better than clever.',
       'No microservices for MVP. Monolith first.',
@@ -117,6 +122,7 @@ You produce plan items about scope, phases, milestones, and priorities.`,
       'Risk identification',
       'Phase planning and dependency mapping',
     ],
+    skillIds: ['project-planning', 'context-search'],
     behavioralRules: [
       'Cut scope by default. Add only when justified.',
       'Phase 1 must be a walking skeleton — end-to-end, minimal.',
@@ -153,6 +159,7 @@ Each recommendation must include a specific package/service name and a concrete 
       'Integration pattern recognition',
       'Developer experience assessment',
     ],
+    skillIds: ['tech-research', 'context-search'],
     behavioralRules: [
       'Always name specific packages/services, not vague categories.',
       'Prefer mature, well-documented tools over shiny new ones.',
@@ -194,6 +201,7 @@ When given plan items to implement:
       'Testing and validation',
       'Performance optimization',
     ],
+    skillIds: ['implementation', 'context-search'],
     behavioralRules: [
       'Write complete, compilable files. No placeholders.',
       'Every file must have correct imports.',
@@ -233,6 +241,7 @@ Do NOT nitpick formatting. Do NOT suggest refactors unless they fix real problem
       'Naming and consistency review',
       'TypeScript type safety analysis',
     ],
+    skillIds: ['code-review', 'context-search'],
     behavioralRules: [
       'Only flag real problems, not style preferences.',
       'Every issue must have a concrete fix suggestion.',
@@ -273,6 +282,7 @@ Do NOT flag theoretical concerns. Flag concrete, exploitable issues in the actua
       'Input validation review',
       'Secret and data exposure detection',
     ],
+    skillIds: ['security-audit', 'code-review', 'context-search'],
     behavioralRules: [
       'Only flag exploitable issues, not theoretical risks.',
       'Every issue must explain the attack vector.',
@@ -312,6 +322,7 @@ Do NOT suggest testing everything. Focus on what would catch real bugs.`,
       'Error handling review',
       'Test quality assessment',
     ],
+    skillIds: ['testing', 'code-review', 'context-search'],
     behavioralRules: [
       'Focus on tests that prevent real bugs, not coverage metrics.',
       'Every issue must describe the specific scenario that would fail.',
@@ -350,6 +361,7 @@ Focus on:
       'Container and CI/CD analysis',
       'Infrastructure security',
     ],
+    skillIds: ['infrastructure', 'context-search'],
     behavioralRules: [
       'Only flag issues that would cause deployment failures.',
       'Environment-specific issues are critical.',
@@ -388,6 +400,7 @@ Focus on:
       'Accessibility assessment',
       'Error state and feedback design',
     ],
+    skillIds: ['ux-design', 'context-search'],
     behavioralRules: [
       'Only review user-facing code (CLI output, API responses, UI components).',
       'Every issue must impact the end user.',
@@ -411,6 +424,7 @@ Focus on:
 You turn vague ideas into precise, testable specifications.
 Used on-demand when explicit spec writing is needed.`,
     skills: ['Requirements analysis', 'Specification writing', 'Acceptance criteria'],
+    skillIds: ['project-planning', 'documentation', 'context-search'],
     behavioralRules: ['Every requirement must be testable.', 'Ambiguity is a bug.'],
     catchphrases: ['Any fool can write code that a computer can understand.'],
     model: 'anthropic/claude-sonnet-4-6',
@@ -429,6 +443,7 @@ Used on-demand when explicit spec writing is needed.`,
 You write README files, API docs, and developer guides.
 Used on-demand at ship time when the user opts in.`,
     skills: ['Technical writing', 'API documentation', 'Developer experience'],
+    skillIds: ['documentation', 'context-search'],
     behavioralRules: ['Examples over explanations.', 'Keep it short.'],
     catchphrases: ['Premature optimization is the root of all evil.'],
     model: 'anthropic/claude-sonnet-4-6',

@@ -3,6 +3,9 @@ import { loadPersona, type PersonaConfig } from './persona.ts';
 import type { IntentClassification, MergedPlan, PlanContribution } from './schemas.ts';
 import type { AssembledContext } from './context-assembler.ts';
 import { formatContext } from './context-assembler.ts';
+import { getSkillRegistry } from './skill.ts';
+import { resolveAgentSkillIds } from './skill-loader.ts';
+import type { ContextHandle } from './rlm/context-handle.ts';
 
 // ---------------------------------------------------------------------------
 // Prompt Layers — the 4-layer architecture
@@ -19,15 +22,42 @@ export interface PromptLayers {
 // Layer 1 — General (per-persona, static per session)
 // ---------------------------------------------------------------------------
 
-function buildLayer1(persona: PersonaConfig): string {
-  return [
+function buildLayer1(persona: PersonaConfig, classification?: IntentClassification): string {
+  const parts = [
     `You are ${persona.codename}, ${persona.displayName}.`,
     `Archetype: ${persona.archetype}.`,
     '',
     persona.systemPrompt,
     '',
-    `Your skills: ${persona.skills.join(', ')}.`,
-    '',
+  ];
+
+  // --- Skill injection (rich, not just string labels) ---
+  const registry = getSkillRegistry();
+  const skillIds = resolveAgentSkillIds(persona.id, persona.skillIds);
+  const skills = registry.resolveForAgent(skillIds, classification);
+
+  if (skills.length > 0) {
+    parts.push('## Your Skills');
+    for (const skill of skills) {
+      parts.push(`### ${skill.name}`);
+      parts.push(skill.description);
+      if (skill.promptTemplate) {
+        parts.push('');
+        parts.push(skill.promptTemplate);
+      }
+      if (skill.knowledgeBase) {
+        parts.push('');
+        parts.push(skill.knowledgeBase);
+      }
+      parts.push('');
+    }
+  } else {
+    // Fallback to legacy string skills
+    parts.push(`Your skills: ${persona.skills.join(', ')}.`);
+    parts.push('');
+  }
+
+  parts.push(
     'Rules you ALWAYS follow:',
     ...persona.behavioralRules.map(r => `- ${r}`),
     '',
@@ -45,7 +75,9 @@ function buildLayer1(persona: PersonaConfig): string {
     '6. When done, call the submit tool to produce your structured result. Do NOT delay submitting — once you have enough context, submit immediately.',
     '7. Avoid repeating the same tool call — if it fails, try a different approach.',
     '8. Call checkGuidance periodically (every 3-5 tool calls) to see if the user has sent you steering instructions. If guidance is returned, incorporate it into your next actions.',
-  ].join('\n');
+  );
+
+  return parts.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +103,37 @@ function buildLayer2(
   if (guidance) {
     parts.push('', '## User Guidance', guidance);
   }
+
+  return parts.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Layer 3 — Context Handle (RLM mode, for large contexts)
+// ---------------------------------------------------------------------------
+
+function buildContextHandleSection(handle: ContextHandle): string {
+  const parts = [
+    '## Context Handle',
+    `You have access to a large context via handle \`${handle.id}\` (type: ${handle.type}).`,
+    '',
+    `**Size**: ${handle.metadata.totalTokens.toLocaleString()} tokens`,
+  ];
+
+  if (handle.metadata.totalFiles !== undefined) {
+    parts.push(`**Files**: ${handle.metadata.totalFiles}`);
+  }
+
+  parts.push('', `**Summary**: ${handle.metadata.summary}`);
+
+  if (handle.metadata.structure) {
+    parts.push('', '**Structure**:', '```', handle.metadata.structure, '```');
+  }
+
+  parts.push(
+    '',
+    'Use peekContext, searchContext, and readChunk tools to explore this context.',
+    'Do NOT try to load the entire context at once — search and peek first.',
+  );
 
   return parts.join('\n');
 }
@@ -126,18 +189,25 @@ export interface AssembleOptions {
   userGuidance?: string;
   /** Extra instructions appended to the user message (e.g. plan items to code, issues to fix) */
   taskInstructions?: string;
+  /** RLM context handle — when set, Layer 3 uses handle metadata instead of inline context */
+  contextHandle?: ContextHandle;
 }
 
 export function assemblePrompt(options: AssembleOptions): PromptLayers {
   const {
     agentId, idea, phase, classification, context,
-    pass2Plan, pass1Contributions, userGuidance,
+    pass2Plan, pass1Contributions, userGuidance, contextHandle,
   } = options;
 
   const persona = loadPersona(agentId);
-  const general = buildLayer1(persona);
+  const general = buildLayer1(persona, classification);
   const intent = buildLayer2(idea, classification, phase, userGuidance);
-  const supportingContext = formatContext(context);
+
+  // Layer 3: RLM handle mode vs inline context
+  const supportingContext = contextHandle
+    ? buildContextHandleSection(contextHandle)
+    : formatContext(context);
+
   const plan = pass2Plan
     ? buildLayer4(pass2Plan, pass1Contributions)
     : undefined;

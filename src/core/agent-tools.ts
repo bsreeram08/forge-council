@@ -11,6 +11,8 @@ import * as path from 'path';
 import { AGENT_TOOL_ACCESS, type ToolDefinition } from '../mastra/tools/tool-registry.ts';
 import { fuzzyReplace } from './fuzzy-match.ts';
 import { drainGuidance, hasGuidance } from './agent-steering.ts';
+import { QMD_TOOLS } from './qmd-tools.ts';
+import { getQmdStore } from './qmd-store.ts';
 
 // ---------------------------------------------------------------------------
 // Path security
@@ -347,19 +349,34 @@ export const READ_WRITE_TOOLS = {
 /**
  * Get the AI SDK tools for a given agent based on their permission level.
  * Includes the checkGuidance tool for all agents (enables mid-execution steering).
+ * Includes QMD tools when the QMD store is available.
+ * Accepts optional extra tools (e.g. RLM tools) to merge in.
  */
-export function getAgentTools(agentId: string): Record<string, any> {
+export function getAgentTools(
+  agentId: string,
+  extraTools?: Record<string, any>,
+): Record<string, any> {
   const access = AGENT_TOOL_ACCESS[resolveBaseAgentId(agentId)];
   const guidanceTool = { checkGuidance: createCheckGuidanceTool(agentId) };
 
-  if (!access) return { ...READ_ONLY_TOOLS, ...guidanceTool };
+  // QMD tools — available to all agents when QMD is ready
+  const qmdTools = getQmdStore()?.isReady() ? QMD_TOOLS : {};
 
-  switch (access.permission) {
-    case 'ADMIN':
-    case 'READ_WRITE':
-      return { ...READ_WRITE_TOOLS, ...guidanceTool };
-    case 'READ_ONLY':
-    default:
-      return { ...READ_ONLY_TOOLS, ...guidanceTool };
+  let base: Record<string, any>;
+  if (!access) {
+    base = { ...READ_ONLY_TOOLS };
+  } else {
+    switch (access.permission) {
+      case 'ADMIN':
+      case 'READ_WRITE':
+        base = { ...READ_WRITE_TOOLS };
+        break;
+      case 'READ_ONLY':
+      default:
+        base = { ...READ_ONLY_TOOLS };
+        break;
+    }
   }
+
+  return { ...base, ...qmdTools, ...guidanceTool, ...extraTools };
 }

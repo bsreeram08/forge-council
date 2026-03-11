@@ -19,7 +19,7 @@ import {
 } from './schemas.ts';
 import { loadPersona, PLANNING_AGENT_IDS, COUNCIL_AGENT_IDS } from './persona.ts';
 import { classifyIntent, greenfieldClassification } from './intent-classifier.ts';
-import { assembleContext, formatContext, getSmallestContextBudget, type AssembledContext } from './context-assembler.ts';
+import { assembleContext, assembleContextSmart, formatContext, getSmallestContextBudget, type AssembledContext } from './context-assembler.ts';
 import { buildAgentMessages } from './prompt-assembler.ts';
 import { buildMergeInstructions, applyPass2Changes, selectReviewAgents } from './plan-merger.ts';
 import { TokenCounter, estimateTokens, type TokenUsage } from './token-counter.ts';
@@ -28,6 +28,9 @@ import type { ForgeCouncilConfig } from '../config/schema.ts';
 import { getAgentTools, resetToolTracking, setProjectRoot } from './agent-tools.ts';
 import { reviewAndApply } from './edit-review.ts';
 import { registerBuiltinHandlers } from './pipeline-handlers.ts';
+import { initializeSkillRegistry } from './skill-loader.ts';
+import { initializeQmdStore } from './qmd-store.ts';
+import { shouldUseRlm, setupRlm, clearSubAgentTracker } from './rlm/index.ts';
 import { z } from 'zod';
 
 // Ensure pipeline handlers are registered for future pipeline integration
@@ -60,6 +63,8 @@ interface GenerateWithToolsOptions<T> {
   maxSteps?: number;
   onProgress?: ProgressCallback;
   abortSignal?: AbortSignal;
+  /** Extra tools to inject (e.g. RLM tools when in RLM mode) */
+  extraTools?: Record<string, any>;
 }
 
 async function generateWithTools<T>(
@@ -68,14 +73,14 @@ async function generateWithTools<T>(
   const {
     models, outputSchema, outputName, outputDescription,
     messages, agentId, temperature, maxOutputTokens,
-    maxSteps = 10, onProgress, abortSignal,
+    maxSteps = 10, onProgress, abortSignal, extraTools,
   } = options;
 
   // Reset read tracking for this agent invocation
   resetToolTracking();
 
-  // Get the agent's allowed tools
-  const agentTools = getAgentTools(agentId);
+  // Get the agent's allowed tools (includes QMD tools when available)
+  const agentTools = getAgentTools(agentId, extraTools);
 
   // Add a "submit" tool that produces the structured output
   const submitTool = tool({
@@ -288,8 +293,22 @@ export interface WorkflowResult {
 
 export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowResult> {
   const { idea, config, projectRoot, guidance, mode, customAgentIds } = options;
-  setProjectRoot(projectRoot ?? process.cwd());
+  const root = projectRoot ?? process.cwd();
+  setProjectRoot(root);
   const tokenCounter = new TokenCounter();
+
+  // --- Initialize Skills, QMD, and RLM subsystems ---
+  initializeSkillRegistry();
+
+  // Initialize QMD store if configured
+  const qmdConfig = config.qmd;
+  if (qmdConfig?.enabled !== false) {
+    try {
+      await initializeQmdStore(qmdConfig ?? { enabled: true, storePath: '.forgecouncil/.qmd', indexOnStart: true, excludePatterns: ['node_modules', '.git', 'dist'], includePatterns: ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx', '**/*.md', '**/*.json'], collections: {}, minScore: 0.2 }, root);
+    } catch {
+      // QMD not available — proceed without it
+    }
+  }
 
   // Determine which agents to use for planning based on mode
   const planningAgents: readonly string[] = mode === 'council'
@@ -331,7 +350,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
     return override?.model?.primary ?? persona.model;
   });
   const smallestBudget = getSmallestContextBudget(planningModelRefs, config);
-  context = await assembleContext(classification, projectRoot, { maxTokens: smallestBudget });
+  context = await assembleContextSmart(classification, projectRoot, { maxTokens: smallestBudget });
   if (context.files.length > 0) {
     p.log.info(`Loaded ${context.files.length} files (${context.totalTokens.toLocaleString()} tokens, budget: ${smallestBudget.toLocaleString()})`);
   }

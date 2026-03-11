@@ -56,6 +56,9 @@ export const CustomAgentSchema = z.object({
 
   // Tool access — specific tools this agent can use (empty = use permission defaults)
   tools: z.array(z.string()).default([]),
+
+  // Skill IDs — references to SkillRegistry entries
+  skillIds: z.array(z.string()).default([]),
 });
 
 export type CustomAgentConfig = z.infer<typeof CustomAgentSchema>;
@@ -86,6 +89,8 @@ export interface ResolvedAgent extends PersonaConfig {
   projectInstructions?: string;
   /** Whether this is a built-in agent or custom */
   isBuiltin: boolean;
+  /** Skill IDs — overrides persona.skillIds when set */
+  explicitSkillIds?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +171,7 @@ export function resolveCustomAgent(config: CustomAgentConfig): ResolvedAgent {
     inspiration: config.inspiration,
     systemPrompt: config.systemPrompt,
     skills: config.skills,
+    skillIds: config.skillIds ?? [],
     behavioralRules: config.behavioralRules,
     catchphrases: config.catchphrases,
     model: config.model,
@@ -177,6 +183,7 @@ export function resolveCustomAgent(config: CustomAgentConfig): ResolvedAgent {
     scoringDimensions: config.scoringDimensions,
     tools: config.tools,
     isBuiltin: false,
+    explicitSkillIds: config.skillIds.length > 0 ? config.skillIds : undefined,
   };
 }
 
@@ -228,6 +235,7 @@ export function loadAllAgents(
  * Only overrides fields that are explicitly set (non-default).
  */
 function mergeAgentOverride(base: ResolvedAgent, override: CustomAgentConfig): ResolvedAgent {
+  const overrideSkillIds = override.skillIds ?? [];
   return {
     ...base,
     codename: override.codename || base.codename,
@@ -235,6 +243,7 @@ function mergeAgentOverride(base: ResolvedAgent, override: CustomAgentConfig): R
     archetype: override.archetype || base.archetype,
     systemPrompt: override.systemPrompt || base.systemPrompt,
     skills: override.skills.length > 0 ? override.skills : base.skills,
+    skillIds: overrideSkillIds.length > 0 ? overrideSkillIds : base.skillIds,
     behavioralRules: override.behavioralRules.length > 0 ? override.behavioralRules : base.behavioralRules,
     model: override.model || base.model,
     temperature: override.temperature,
@@ -246,6 +255,7 @@ function mergeAgentOverride(base: ResolvedAgent, override: CustomAgentConfig): R
       ? override.scoringDimensions
       : base.scoringDimensions,
     tools: override.tools.length > 0 ? override.tools : base.tools,
+    explicitSkillIds: overrideSkillIds.length > 0 ? overrideSkillIds : base.explicitSkillIds,
   };
 }
 

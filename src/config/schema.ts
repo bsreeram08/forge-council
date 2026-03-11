@@ -160,6 +160,55 @@ export const CodingConfigSchema = z.object({
 
 export type CodingConfig = z.infer<typeof CodingConfigSchema>;
 
+// --- Skills config ---
+
+export const SkillsConfigSchema = z.object({
+  /** Whether skill-based tool grants can escalate beyond base permission level */
+  canEscalatePermission: z.boolean().default(false),
+  /** Custom skill file directories (in addition to default locations) */
+  extraDirs: z.array(z.string()).default([]),
+});
+
+export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
+
+// --- QMD config (on-device semantic search for context assembly) ---
+
+export const QmdConfigSchema = z.object({
+  /** Enable QMD-based context assembly */
+  enabled: z.boolean().default(true),
+  /** Path to QMD SQLite store (relative to project root) */
+  storePath: z.string().default('.forgecouncil/.qmd'),
+  /** Auto-index project on first use */
+  indexOnStart: z.boolean().default(true),
+  /** Glob patterns to exclude from indexing */
+  excludePatterns: z.array(z.string()).default(['node_modules', '.git', 'dist', 'coverage', '.forgecouncil/.qmd']),
+  /** File patterns to include (empty = all text files) */
+  includePatterns: z.array(z.string()).default(['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx', '**/*.md', '**/*.json', '**/*.yaml', '**/*.yml']),
+  /** Collections to create (name → path mapping) */
+  collections: z.record(z.string(), z.string()).default({}),
+  /** Min relevance score for search results (0-1) */
+  minScore: z.number().min(0).max(1).default(0.2),
+});
+
+export type QmdConfig = z.infer<typeof QmdConfigSchema>;
+
+// --- RLM config (Recursive Language Models for large context processing) ---
+
+export const RlmConfigSchema = z.object({
+  /** Enable RLM mode for large contexts */
+  enabled: z.boolean().default(true),
+  /** Token threshold above which RLM mode activates (inline below this) */
+  contextThreshold: z.number().default(50_000),
+  /** Max recursion depth for sub-agent calls */
+  maxDepth: z.number().min(1).max(5).default(3),
+  /** Max total sub-agent calls per top-level invocation */
+  maxSubAgentCalls: z.number().min(1).max(50).default(10),
+  /** Token budget fraction for sub-agents (relative to parent) */
+  subAgentBudgetFraction: z.number().min(0.1).max(0.8).default(0.5),
+});
+
+export type RlmConfig = z.infer<typeof RlmConfigSchema>;
+
 // --- Top-level config ---
 
 export const ForgeCouncilConfigSchema = z.object({
@@ -176,6 +225,9 @@ export const ForgeCouncilConfigSchema = z.object({
   pipeline: PipelineConfigSchema.optional(),
   editReview: EditReviewConfigSchema.optional(),
   coding: CodingConfigSchema.optional(),
+  skills: SkillsConfigSchema.optional(),
+  qmd: QmdConfigSchema.optional(),
+  rlm: RlmConfigSchema.optional(),
 });
 
 export type ForgeCouncilConfig = z.infer<typeof ForgeCouncilConfigSchema>;
