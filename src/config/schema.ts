@@ -209,6 +209,24 @@ export const RlmConfigSchema = z.object({
 
 export type RlmConfig = z.infer<typeof RlmConfigSchema>;
 
+// --- Plugins config ---
+
+export const PluginsConfigSchema = z.object({
+  /** Whether the plugin system is enabled */
+  enabled: z.boolean().default(true),
+  /** Enable built-in plugins (validation-gate, task-scope-guard) */
+  builtins: z.object({
+    'validation-gate': z.boolean().default(true),
+    'task-scope-guard': z.boolean().default(true),
+  }).default({ 'validation-gate': true, 'task-scope-guard': true }),
+  /** Extra directories to scan for plugins (in addition to default locations) */
+  extraDirs: z.array(z.string()).default([]),
+  /** Per-plugin config overrides keyed by plugin name */
+  configs: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
+});
+
+export type PluginsConfig = z.infer<typeof PluginsConfigSchema>;
+
 // --- Top-level config ---
 
 export const ForgeCouncilConfigSchema = z.object({
@@ -228,6 +246,7 @@ export const ForgeCouncilConfigSchema = z.object({
   skills: SkillsConfigSchema.optional(),
   qmd: QmdConfigSchema.optional(),
   rlm: RlmConfigSchema.optional(),
+  plugins: PluginsConfigSchema.optional(),
 });
 
 export type ForgeCouncilConfig = z.infer<typeof ForgeCouncilConfigSchema>;

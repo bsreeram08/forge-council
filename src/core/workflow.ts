@@ -31,6 +31,9 @@ import { registerBuiltinHandlers } from './pipeline-handlers.ts';
 import { initializeSkillRegistry } from './skill-loader.ts';
 import { initializeQmdStore } from './qmd-store.ts';
 import { shouldUseRlm, setupRlm, clearSubAgentTracker } from './rlm/index.ts';
+import { initializePlugins } from './plugin-loader.ts';
+import { getPluginRegistry } from './plugin.ts';
+import { BUILTIN_PLUGINS } from './builtin-plugins.ts';
 import { z } from 'zod';
 
 // Ensure pipeline handlers are registered for future pipeline integration
@@ -297,8 +300,30 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   setProjectRoot(root);
   const tokenCounter = new TokenCounter();
 
-  // --- Initialize Skills, QMD, and RLM subsystems ---
+  // --- Initialize Skills, QMD, RLM, and Plugins subsystems ---
   initializeSkillRegistry();
+
+  // Initialize plugin system
+  const pluginsConfig = config.plugins;
+  if (pluginsConfig?.enabled !== false) {
+    const builtinPlugins = BUILTIN_PLUGINS.filter(p => {
+      const builtins = pluginsConfig?.builtins;
+      if (!builtins) return true;
+      return builtins[p.name as keyof typeof builtins] !== false;
+    });
+    try {
+      await initializePlugins({
+        config,
+        builtins: builtinPlugins,
+        extraDirs: pluginsConfig?.extraDirs,
+        projectRoot: root,
+        pluginConfigs: pluginsConfig?.configs,
+      });
+    } catch (e) {
+      // Plugins are non-critical — proceed without them
+      p.log.warn(`Plugin init failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   // Initialize QMD store if configured
   const qmdConfig = config.qmd;
@@ -341,6 +366,9 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   }
 
   p.log.info(`Type: ${classification.taskType} | Domains: ${classification.domains.join(', ')} | Complexity: ${classification.complexity}`);
+
+  // Plugin hook: classify:after
+  await getPluginRegistry().emit('classify:after', { idea, classification });
 
   // --- Assemble static context ---
   // Budget context for the smallest model across all planning agents
@@ -440,6 +468,9 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
     plan = pickResult.plan;
   }
 
+  // Plugin hook: plan:merge (after merge + pick)
+  await getPluginRegistry().emit('plan:merge', { plan });
+
   // --- Phase 4: CODE ---
   eventBus.publish('round', { round: 1, phase: 'coding' });
   const parallelCount = Math.min(
@@ -470,6 +501,9 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   const coderBudget = getSmallestContextBudget([coderModelRef], config);
   const codeContext = await assembleContext(codeClassification, projectRoot, { maxTokens: coderBudget });
   const codingOutputs = await runCoding(idea, plan, codeClassification, codeContext, config, tokenCounter, guidance);
+
+  // Plugin hook: code:after
+  await getPluginRegistry().emit('code:after', { codingOutputs });
 
   // Collect all files that were created
   const allFiles = codingOutputs.flatMap(o => o.files.map(f => f.path));
@@ -522,6 +556,9 @@ export async function runWorkflow(options: WorkflowOptions): Promise<WorkflowRes
   const reviews = await runReview(
     idea, reviewClassification, reviewContext, reviewSelection.agentIds, config, tokenCounter,
   );
+
+  // Plugin hook: review:after
+  await getPluginRegistry().emit('review:after', { reviews, codingOutputs });
 
   // Show reviews to user
   displayReviews(reviews);

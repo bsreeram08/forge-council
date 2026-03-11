@@ -13,6 +13,7 @@ import { fuzzyReplace } from './fuzzy-match.ts';
 import { drainGuidance, hasGuidance } from './agent-steering.ts';
 import { QMD_TOOLS } from './qmd-tools.ts';
 import { getQmdStore } from './qmd-store.ts';
+import { getPluginRegistry, type ToolHookData } from './plugin.ts';
 
 // ---------------------------------------------------------------------------
 // Path security
@@ -346,11 +347,67 @@ export const READ_WRITE_TOOLS = {
   gitCommit: gitCommitTool,
 };
 
+// ---------------------------------------------------------------------------
+// Plugin-aware tool wrapping
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap a tool's execute function with plugin pre/post hooks.
+ * - Pre hooks can block execution or transform input
+ * - Post hooks can inject feedback into the tool result
+ */
+function wrapToolWithPluginHooks(
+  toolName: string,
+  originalTool: any,
+  agentId: string,
+): any {
+  const registry = getPluginRegistry();
+
+  // Only wrap if there are hooks registered
+  if (registry.hookCount('tool:pre') === 0 && registry.hookCount('tool:post') === 0) {
+    return originalTool;
+  }
+
+  const originalExecute = originalTool.execute;
+  if (!originalExecute) return originalTool;
+
+  return {
+    ...originalTool,
+    execute: async (input: any, options: any) => {
+      const hookData: ToolHookData = { toolName, input, agentId };
+
+      // Pre-hook — can block
+      const preResult = await registry.emitPreHook('tool:pre', hookData);
+      if (preResult.blocked) {
+        return { blocked: true, reason: preResult.reason };
+      }
+
+      // Execute original tool
+      const output = await originalExecute(input, options);
+
+      // Post-hook — can inject feedback
+      const postData: ToolHookData = { toolName, input, agentId, output };
+      const feedback = await registry.emitAndCollectFeedback('tool:post', postData);
+
+      // If there's feedback from plugins, append it to the tool result
+      if (feedback) {
+        if (typeof output === 'object' && output !== null) {
+          return { ...output, pluginFeedback: feedback };
+        }
+        return { result: output, pluginFeedback: feedback };
+      }
+
+      return output;
+    },
+  };
+}
+
 /**
  * Get the AI SDK tools for a given agent based on their permission level.
  * Includes the checkGuidance tool for all agents (enables mid-execution steering).
  * Includes QMD tools when the QMD store is available.
  * Accepts optional extra tools (e.g. RLM tools) to merge in.
+ * Wraps write tools with plugin hooks (validation gate, etc.).
  */
 export function getAgentTools(
   agentId: string,
@@ -378,5 +435,13 @@ export function getAgentTools(
     }
   }
 
-  return { ...base, ...qmdTools, ...guidanceTool, ...extraTools };
+  const merged = { ...base, ...qmdTools, ...guidanceTool, ...extraTools };
+
+  // Wrap tools with plugin hooks
+  const wrapped: Record<string, any> = {};
+  for (const [name, t] of Object.entries(merged)) {
+    wrapped[name] = wrapToolWithPluginHooks(name, t, agentId);
+  }
+
+  return wrapped;
 }
